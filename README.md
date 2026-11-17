@@ -19,7 +19,7 @@ ROS 2 Jazzy(Ubuntu 24.04) 기반 식물 관찰 로봇입니다. RPLIDAR C1 + Nav
 ROS 2 Jazzy가 설치된 Ubuntu 24.04에서:
 
 ```bash
-git clone <이 저장소 주소> ~/plant_ws
+git clone https://github.com/east-eun02/2026_-_-.git ~/plant_ws
 cd ~/plant_ws
 bash setup_robot_linux.sh --with-gazebo   # 라이다 드라이버(sllidar_ros2)도 자동으로 받아 빌드합니다
 ```
