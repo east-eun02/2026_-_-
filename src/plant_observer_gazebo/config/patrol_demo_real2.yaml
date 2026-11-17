@@ -1,0 +1,15 @@
+# 실물 시연 구역(2.7 x 1.8m) 순찰 루트, 지도 maps/demo_real2.yaml 기준 (patrol_manager route:=demo_real2)
+# demo_real2는 로봇을 서쪽 벽 옆(0.21m)에 두고 만든 지도라 지도 원점에서는 출발할 수 없다.
+# 그래서 지도에서 벽을 맞춰 구한 구역 기준으로 patrol_demo.yaml과 같은 배치를 다시 잡았다:
+#   구역 북쪽 = 지도 yaw 0.144 (약 8°), 구역 중심 = 지도 (0.33, -1.06)
+#   출발점 = 남쪽 벽에서 0.5m·동서 가운데, 북쪽을 봄
+#   화분: plant_00 = 지도 (0.83, -1.59), plant_01 = 지도 (0.65, -0.41)
+#         (출발점에서 정면 0.8m, 오른쪽/왼쪽 0.6m = 북쪽 벽에서 약 0.5m)
+# 관측 지점은 화분 중심에서 0.5m 앞. AMCL 초기 위치(0, 0)가 home과 달라 patrol_manager가 시작할 때
+# home을 /initialpose로 보낸다(set_initial_pose, 기본 켜짐).
+# 실물 U20CAM이 옆으로 달려 있어 사진을 시계 방향 90° 돌려 저장한다 (patrol_manager image_rotation)
+image_rotation: 90
+home: {x: -0.05, y: -1.11, yaw: 0.144}
+stops:
+  - {id: P00, x: 0.33, y: -1.66, yaw: 0.144}
+  - {id: P01, x: 0.16, y: -0.48, yaw: 0.144}

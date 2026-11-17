@@ -1,0 +1,12 @@
+# 라이다 뒤쪽 카메라 기둥(약 0.16m)을 지운다. Gazebo·실물 공용.
+scan_to_scan_filter_chain:
+  ros__parameters:
+    filter1:
+      name: body_range
+      type: laser_filters/LaserScanRangeFilter
+      params:
+        use_message_range_limits: false
+        lower_threshold: 0.2
+        upper_threshold: 12.0
+        lower_replacement_value: .nan
+        upper_replacement_value: .nan

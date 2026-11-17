@@ -1,0 +1,25 @@
+# 노트북을 켜면 로그인 없이 로봇 + Nav2 + 관찰 기록 화면을 띄운다 (순찰은 시작하지 않음).
+# 설치·켜고 끄기는 install_onboard_service.sh 참고
+[Unit]
+Description=Plant observer onboard stack (robot + Nav2 + review screen)
+# USB 장치가 없거나 실패해도 계속 다시 시도한다
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+ExecStart=%h/plant_ws/src/plant_observer_bringup/service/onboard_start.sh
+Environment=ROS_DOMAIN_ID=7
+Environment=PYTHONUNBUFFERED=1
+Environment=RCUTILS_COLORIZED_OUTPUT=0
+# GitHub 업로더: 로그인 없이 돌아서 ssh-agent가 없다. 비밀번호 없는 키로만 push하고 막히면 바로 실패
+Environment="GIT_SSH_COMMAND=/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=10"
+# 끌 때 SIGINT를 ros2 launch에만 보낸다(Ctrl-C와 같음). 모든 프로세스에 한꺼번에 보내면
+# nav2_session의 순서대로 종료가 깨진다. 90초 안에 안 꺼지면 남은 프로세스를 강제 종료
+KillMode=mixed
+KillSignal=SIGINT
+TimeoutStopSec=90
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

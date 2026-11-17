@@ -1,0 +1,120 @@
+<?xml version="1.0"?>
+<!--
+  시연용 소형 구역: 2.7m x 1.8m(내부), 칸막이 높이 0.5m.
+  화분 2개만 둔다: plant_00(잎만) · plant_01(빨간 열매).
+  로봇은 (0, -0.4)에서 북쪽(+y)을 보고 시작하고, 화분은 (±0.6, 0.4). 로봇과 화분 배치는
+  이전 2.0m x 1.5m 구역과 같고 구역 가운데에 두었다(patrol_demo.yaml 좌표 그대로 사용).
+  여유: 로봇 뒤 남쪽 벽까지 0.5m, 화분 뒤 북쪽 벽까지 0.39m, 화분 옆 동·서쪽 벽까지 0.84m.
+-->
+<sdf version="1.9">
+  <world name="demo">
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+
+    <scene>
+      <ambient>0.6 0.6 0.6 1</ambient>
+      <background>0.75 0.85 0.95 1</background>
+      <shadows>true</shadows>
+    </scene>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.9 0.9 0.85 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.4 0.2 -0.9</direction>
+    </light>
+
+    <model name="ground">
+      <static>true</static>
+      <link name="link">
+        <collision name="c"><geometry><plane><normal>0 0 1</normal><size>20 20</size></plane></geometry></collision>
+        <visual name="v"><geometry><plane><normal>0 0 1</normal><size>20 20</size></plane></geometry>
+          <material><ambient>0.5 0.5 0.47 1</ambient><diffuse>0.6 0.6 0.56 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <model name="wall_north">
+      <static>true</static>
+      <pose>0 0.925 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>2.8 0.05 0.5</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>2.8 0.05 0.5</size></box></geometry>
+          <material><ambient>0.9 0.9 0.88 1</ambient><diffuse>0.9 0.9 0.88 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="wall_south">
+      <static>true</static>
+      <pose>0 -0.925 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>2.8 0.05 0.5</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>2.8 0.05 0.5</size></box></geometry>
+          <material><ambient>0.9 0.9 0.88 1</ambient><diffuse>0.9 0.9 0.88 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="wall_east">
+      <static>true</static>
+      <pose>1.375 0 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.05 1.8 0.5</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.05 1.8 0.5</size></box></geometry>
+          <material><ambient>0.9 0.9 0.88 1</ambient><diffuse>0.9 0.9 0.88 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="wall_west">
+      <static>true</static>
+      <pose>-1.375 0 0.25 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.05 1.8 0.5</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.05 1.8 0.5</size></box></geometry>
+          <material><ambient>0.9 0.9 0.88 1</ambient><diffuse>0.9 0.9 0.88 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <model name="plant_00">
+      <static>true</static>
+      <pose>0.6 0.4 0 0 0 0</pose>
+      <link name="link">
+        <collision name="pot_c"><pose>0 0 0.13 0 0 0</pose><geometry><cylinder><radius>0.11</radius><length>0.26</length></cylinder></geometry></collision>
+        <visual name="pot"><pose>0 0 0.13 0 0 0</pose><geometry><cylinder><radius>0.11</radius><length>0.26</length></cylinder></geometry>
+          <material><ambient>0.55 0.27 0.12 1</ambient><diffuse>0.65 0.32 0.15 1</diffuse></material></visual>
+        <visual name="soil"><pose>0 0 0.261 0 0 0</pose><geometry><cylinder><radius>0.10</radius><length>0.004</length></cylinder></geometry>
+          <material><ambient>0.2 0.13 0.07 1</ambient><diffuse>0.25 0.16 0.08 1</diffuse></material></visual>
+        <visual name="stem"><pose>0 0 0.33 0 0 0</pose><geometry><cylinder><radius>0.008</radius><length>0.14</length></cylinder></geometry>
+          <material><ambient>0.3 0.45 0.15 1</ambient><diffuse>0.35 0.5 0.18 1</diffuse></material></visual>
+        <visual name="leaf0"><pose>0 0 0.4 0 0 0</pose><geometry><sphere><radius>0.11</radius></sphere></geometry><material><ambient>0.12 0.45 0.12 1</ambient><diffuse>0.15 0.55 0.15 1</diffuse></material></visual>
+        <visual name="leaf1"><pose>0.06 0.04 0.47 0 0 0</pose><geometry><sphere><radius>0.08</radius></sphere></geometry><material><ambient>0.12 0.45 0.12 1</ambient><diffuse>0.15 0.55 0.15 1</diffuse></material></visual>
+        <visual name="leaf2"><pose>-0.05 -0.05 0.46 0 0 0</pose><geometry><sphere><radius>0.08</radius></sphere></geometry><material><ambient>0.12 0.45 0.12 1</ambient><diffuse>0.15 0.55 0.15 1</diffuse></material></visual>
+        <visual name="leaf3"><pose>0.03 -0.07 0.36 0 0 0</pose><geometry><sphere><radius>0.07</radius></sphere></geometry><material><ambient>0.12 0.45 0.12 1</ambient><diffuse>0.15 0.55 0.15 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="plant_01">
+      <static>true</static>
+      <pose>-0.6 0.4 0 0 0 0</pose>
+      <link name="link">
+        <collision name="pot_c"><pose>0 0 0.13 0 0 0</pose><geometry><cylinder><radius>0.11</radius><length>0.26</length></cylinder></geometry></collision>
+        <visual name="pot"><pose>0 0 0.13 0 0 0</pose><geometry><cylinder><radius>0.11</radius><length>0.26</length></cylinder></geometry>
+          <material><ambient>0.55 0.27 0.12 1</ambient><diffuse>0.65 0.32 0.15 1</diffuse></material></visual>
+        <visual name="soil"><pose>0 0 0.261 0 0 0</pose><geometry><cylinder><radius>0.10</radius><length>0.004</length></cylinder></geometry>
+          <material><ambient>0.2 0.13 0.07 1</ambient><diffuse>0.25 0.16 0.08 1</diffuse></material></visual>
+        <visual name="stem"><pose>0 0 0.33 0 0 0</pose><geometry><cylinder><radius>0.008</radius><length>0.14</length></cylinder></geometry>
+          <material><ambient>0.3 0.45 0.15 1</ambient><diffuse>0.35 0.5 0.18 1</diffuse></material></visual>
+        <visual name="leaf0"><pose>0 0 0.4 0 0 0</pose><geometry><sphere><radius>0.11</radius></sphere></geometry><material><ambient>0.12 0.45 0.12 1</ambient><diffuse>0.15 0.55 0.15 1</diffuse></material></visual>
+        <visual name="leaf1"><pose>0.06 0.04 0.47 0 0 0</pose><geometry><sphere><radius>0.08</radius></sphere></geometry><material><ambient>0.12 0.45 0.12 1</ambient><diffuse>0.15 0.55 0.15 1</diffuse></material></visual>
+        <visual name="leaf2"><pose>-0.05 -0.05 0.46 0 0 0</pose><geometry><sphere><radius>0.08</radius></sphere></geometry><material><ambient>0.12 0.45 0.12 1</ambient><diffuse>0.15 0.55 0.15 1</diffuse></material></visual>
+        <visual name="leaf3"><pose>0.03 -0.07 0.36 0 0 0</pose><geometry><sphere><radius>0.07</radius></sphere></geometry><material><ambient>0.12 0.45 0.12 1</ambient><diffuse>0.15 0.55 0.15 1</diffuse></material></visual>
+        <visual name="fruit0"><pose>0.09 0.02 0.42 0 0 0</pose><geometry><sphere><radius>0.022</radius></sphere></geometry><material><ambient>0.8 0.1 0.05 1</ambient><diffuse>0.9 0.15 0.05 1</diffuse></material></visual>
+        <visual name="fruit1"><pose>0.04 0.09 0.44 0 0 0</pose><geometry><sphere><radius>0.022</radius></sphere></geometry><material><ambient>0.8 0.1 0.05 1</ambient><diffuse>0.9 0.15 0.05 1</diffuse></material></visual>
+        <visual name="fruit2"><pose>0.08 -0.06 0.39 0 0 0</pose><geometry><sphere><radius>0.022</radius></sphere></geometry><material><ambient>0.8 0.1 0.05 1</ambient><diffuse>0.9 0.15 0.05 1</diffuse></material></visual>
+      </link>
+    </model>
+  </world>
+</sdf>

@@ -1,0 +1,181 @@
+<?xml version="1.0"?>
+<!--
+  식물관찰 로봇 B안 (R10 노트북 판넬 + R11 라이다 판넬)
+  좌표: +x 전방, +y 왼쪽, +z 위. 원점(base_footprint)은 바퀴 축 중점의 지면 투영.
+  치수 출처: 노션 「B안 설계 · 검증」. 외형은 시각화용으로 단순화했다.
+-->
+<robot name="plant_observer" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- 구동부 (ISW-01 휠 + XL430) -->
+  <xacro:property name="wheel_radius" value="0.033"/>
+  <xacro:property name="wheel_width" value="0.018"/>
+  <xacro:property name="wheel_separation" value="0.287"/>
+  <xacro:property name="caster_x" value="0.112"/>
+
+  <!-- RPLIDAR C1: R11 기준 중심 XY=(60,0)mm, 본체 하단 163.6mm, 스캔면은 하단+29.8mm -->
+  <xacro:property name="lidar_x" value="0.060"/>
+  <xacro:property name="lidar_scan_z" value="0.1934"/>
+
+  <!-- U20CAM-1080p-1: 렌즈 높이 505mm(R10). 기둥 x위치·하향 각도는 실측 전 가정값 -->
+  <xacro:property name="camera_x" value="-0.100"/>
+  <xacro:property name="camera_z" value="0.505"/>
+  <xacro:property name="camera_pitch" value="0.35"/>
+  <xacro:property name="camera_hfov" value="1.80"/>
+
+
+  <material name="plate"><color rgba="0.15 0.15 0.15 1"/></material>
+  <material name="panel"><color rgba="0.85 0.85 0.80 1"/></material>
+  <material name="laptop"><color rgba="0.55 0.57 0.60 1"/></material>
+  <material name="rubber"><color rgba="0.05 0.05 0.05 1"/></material>
+  <material name="lidar"><color rgba="0.10 0.10 0.12 1"/></material>
+  <material name="mast"><color rgba="0.95 0.95 0.95 1"/></material>
+
+  <link name="base_footprint"/>
+
+  <!-- base_link 원점 = 바퀴 축 높이 -->
+  <joint name="base_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 ${wheel_radius}"/>
+  </joint>
+
+  <link name="base_link">
+    <!-- 1층 와플 (하단 10.1mm) -->
+    <visual>
+      <origin xyz="0 0 ${0.0146 - wheel_radius}"/>
+      <geometry><box size="0.280 0.250 0.009"/></geometry>
+      <material name="plate"/>
+    </visual>
+    <!-- 2층 와플 (하단 47.6mm) -->
+    <visual>
+      <origin xyz="0 0 ${0.0521 - wheel_radius}"/>
+      <geometry><box size="0.280 0.250 0.009"/></geometry>
+      <material name="plate"/>
+    </visual>
+    <!-- P20 노트북 판넬 + 노트북 (덮개 닫힘) -->
+    <visual>
+      <origin xyz="0 0 ${0.1046 - wheel_radius}"/>
+      <geometry><box size="0.312 0.382 0.006"/></geometry>
+      <material name="panel"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 ${0.1157 - wheel_radius}"/>
+      <geometry><box size="0.224 0.312 0.0156"/></geometry>
+      <material name="laptop"/>
+    </visual>
+    <!-- P10 라이다 판넬 -->
+    <visual>
+      <origin xyz="${lidar_x} 0 ${0.1576 - wheel_radius}"/>
+      <geometry><box size="0.114 0.402 0.012"/></geometry>
+      <material name="panel"/>
+    </visual>
+    <!-- 카메라 기둥 (2층 고정) -->
+    <visual>
+      <origin xyz="${camera_x} 0 ${(0.0566 + camera_z - 0.03) / 2 - wheel_radius}"/>
+      <geometry><box size="0.024 0.024 ${camera_z - 0.03 - 0.0566}"/></geometry>
+      <material name="mast"/>
+    </visual>
+    <!-- 차체 충돌 상자 (판넬 포함) -->
+    <collision>
+      <origin xyz="0 0 ${0.085 - wheel_radius}"/>
+      <geometry><box size="0.290 0.380 0.150"/></geometry>
+    </collision>
+    <!-- 앞뒤 볼캐스터: 마찰 없는 구로 단순화 -->
+    <collision name="caster_front">
+      <origin xyz="${caster_x} 0 ${0.0155 - wheel_radius}"/>
+      <geometry><sphere radius="0.0155"/></geometry>
+    </collision>
+    <collision name="caster_rear">
+      <origin xyz="${-caster_x} 0 ${0.0155 - wheel_radius}"/>
+      <geometry><sphere radius="0.0155"/></geometry>
+    </collision>
+    <inertial>
+      <origin xyz="0 0 0.05"/>
+      <!-- 차체 2.5kg + 노트북 1.23kg (노션 설계 가정, 실측 전) -->
+      <mass value="3.3"/>
+      <inertia ixx="0.045" ixy="0" ixz="0" iyy="0.030" iyz="0" izz="0.055"/>
+    </inertial>
+  </link>
+
+  <xacro:macro name="wheel" params="side y">
+    <joint name="wheel_${side}_joint" type="continuous">
+      <parent link="base_link"/>
+      <child link="wheel_${side}_link"/>
+      <origin xyz="0 ${y} 0" rpy="${-pi/2} 0 0"/>
+      <axis xyz="0 0 1"/>
+    </joint>
+    <link name="wheel_${side}_link">
+      <visual>
+        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+        <material name="rubber"/>
+      </visual>
+      <collision>
+        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+      </collision>
+      <inertial>
+        <mass value="0.1"/>
+        <inertia ixx="3.0e-5" ixy="0" ixz="0" iyy="3.0e-5" iyz="0" izz="5.4e-5"/>
+      </inertial>
+    </link>
+    <gazebo reference="wheel_${side}_link">
+      <mu1>1.0</mu1>
+      <mu2>1.0</mu2>
+      <kp>500000.0</kp>
+      <kd>10.0</kd>
+      <minDepth>0.001</minDepth>
+    </gazebo>
+  </xacro:macro>
+
+  <xacro:wheel side="left" y="${wheel_separation / 2}"/>
+  <xacro:wheel side="right" y="${-wheel_separation / 2}"/>
+
+  <gazebo reference="base_link">
+    <mu1>0.0</mu1>
+    <mu2>0.0</mu2>
+  </gazebo>
+
+  <!-- RPLIDAR C1: sllidar_ros2 스캔의 0°가 로봇 뒤쪽을 향해 yaw π (실물에서 뒤쪽 카메라 기둥이 0°에 잡힘) -->
+  <joint name="laser_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="laser"/>
+    <origin xyz="${lidar_x} 0 ${lidar_scan_z}" rpy="0 0 ${pi}"/>
+  </joint>
+  <link name="laser">
+    <visual>
+      <origin xyz="0 0 -0.009"/>
+      <geometry><cylinder radius="0.0278" length="0.041"/></geometry>
+      <material name="lidar"/>
+    </visual>
+    <inertial>
+      <mass value="0.01"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </link>
+
+  <!-- 카메라: camera_link는 x 전방, camera_optical_frame은 ROS 광학 규약(z 전방) -->
+  <joint name="camera_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="camera_link"/>
+    <origin xyz="${camera_x} 0 ${camera_z}" rpy="0 ${camera_pitch} 0"/>
+  </joint>
+  <link name="camera_link">
+    <visual>
+      <origin xyz="-0.008 0 0"/>
+      <geometry><box size="0.016 0.040 0.040"/></geometry>
+      <material name="lidar"/>
+    </visual>
+    <inertial>
+      <mass value="0.01"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </link>
+  <joint name="camera_optical_joint" type="fixed">
+    <parent link="camera_link"/>
+    <child link="camera_optical_frame"/>
+    <origin rpy="${-pi/2} 0 ${-pi/2}"/>
+  </joint>
+  <link name="camera_optical_frame"/>
+
+  <xacro:include filename="$(find plant_observer_description)/urdf/plant_observer.gazebo.xacro"/>
+
+</robot>

@@ -1,0 +1,27 @@
+# 실물 구동 노드 설정. 값의 출처: 노션 「모터제어 — OpenRB-150 + XL430 실습 매뉴얼」, URDF
+base_driver:
+  ros__parameters:
+    port: /dev/openrb
+    baudrate: 57600
+    left_id: 1
+    right_id: 2
+    # 바퀴를 띄운 상태에서 전진 명령 시 두 바퀴가 앞으로 구르는지 보고 맞춘다 (실물 미검증)
+    left_forward_sign: 1
+    right_forward_sign: -1
+    # 설계값. 실측 후 수정 (노션 매뉴얼 윤거는 288mm, URDF는 287mm)
+    wheel_radius: 0.033
+    wheel_separation: 0.287
+    # 45RPM ≈ 직진 0.155m/s, 제자리 회전 최대 약 1.08rad/s. XL430 무부하 최대 약 57RPM(12V).
+    # 30RPM(0.10m/s)에서 옆면 촬영 이동의 절반 이상이 제자리 회전이라 올렸다 (2026-11-03)
+    max_wheel_rpm: 45.0
+    # XL430 Profile Acceleration 단위(214.577 rev/min²): 15 ≈ 0.84초에 45RPM 도달.
+    # 회전 가속 약 1.3rad/s². 10이면 0.86rad/s²라 Nav2 회전 가속(1.5)을 바퀴가 따라가지 못한다
+    profile_acceleration: 15
+    cmd_timeout: 0.5
+    min_voltage: 8.5
+    max_voltage: 11.5
+    max_comm_failures: 5
+    # 통신(USB)이 이 시간 끊기면 모터가 스스로 정지 (XL430 Bus Watchdog, 20ms 단위)
+    bus_watchdog_ms: 250
+    rate: 20.0
+    publish_tf: true

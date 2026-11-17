@@ -1,0 +1,7 @@
+# 기본값과 같다(patrol_manager는 model_fallback 기본 켜짐). 경로·제한 시간을 바꿀 때만 쓴다. 정상 비교 결과는 바꾸지 않는다.
+patrol_manager:
+  ros__parameters:
+    model_fallback: true
+    model_python: ~/plant_ws/.model_runtime/bin/python
+    model_weights: ~/plant_ws/models/yolo11n-seg.pt
+    model_timeout: 20.0
