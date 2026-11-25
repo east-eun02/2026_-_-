@@ -37,12 +37,30 @@ YOLO 가중치는 저장소에 포함하지 않습니다. `~/plant_ws/models/`�
 # 시뮬레이션 (map:=greenhouse | demo ...)
 ros2 launch plant_observer_gazebo sim.launch.py map:=demo
 
-# 실물 로봇: 로봇 + Nav2 + 관찰 기록 화면 (기본 지도 maps/demo_real3.yaml)
+# 실물 로봇: 로봇 + Nav2 (기본 지도 maps/demo_real3.yaml). review:=true면 관찰 기록 화면도 같이
 ros2 launch plant_observer_bringup onboard.launch.py
 
 # 순찰 시작 (다른 터미널)
 ros2 run plant_observer_bringup patrol_manager --ros-args -p route:=demo_real3
 ```
+
+### 휴대폰으로 운용 (노트북을 차체에 올렸을 때)
+
+관찰 기록 화면(`http://<노트북 IP>:8080`) 맨 위의 **로봇 제어**에서 로봇 켜기·끄기, 순찰 시작·정지, 출발점 복귀, 노트북 끄기를 합니다. 세 가지 systemd 사용자 서비스로 돌아갑니다.
+
+| 서비스 | 내용 |
+|---|---|
+| `plant-review` | 관찰 기록 화면 + 로봇 제어 버튼. 부팅하면 항상 켜짐 |
+| `plant-onboard` | 로봇 + Nav2 (`onboard.launch.py`). 화면의 '로봇 켜기'로 켬 |
+| `plant-patrol` | 순찰 한 번. 로봇이 켜져 있을 때만 시작되고, 로봇을 끄면 먼저 멈춤 |
+
+```bash
+src/plant_observer_bringup/service/install_onboard_service.sh --enable   # 부팅 시 화면 자동 시작 (로그인 불필요)
+src/plant_observer_bringup/service/install_onboard_service.sh --disable  # 선 연결해서 터미널로 개발할 때
+journalctl --user -u plant-onboard -f                                    # 로봇 로그
+```
+
+`~/.config/plant_observer/panel_pin` 파일에 숫자를 적어 두면 제어 버튼에 PIN을 묻습니다. 휴대폰 핫스팟처럼 믿을 수 있는 네트워크에서만 쓰세요.
 
 순찰 결과 업로드(`capture_uploader`)는 별도의 결과 저장소를 `~/plant_ws/upload_repo`에 clone해 두었을 때만 동작합니다.
 

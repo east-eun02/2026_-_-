@@ -3,14 +3,20 @@
 patrol_manager가 남긴 <capture_dir>/<회차>/result.json·사진·<지점 ID>_compare.jpg를 그대로 읽는다.
 관리자가 저장한 확인 결과·메모는 <capture_dir>/reviews.json 한 파일에 모은다(순찰 기록은 건드리지 않는다).
 
+맨 위 '로봇 제어'에서 로봇 켜기·끄기, 순찰 시작·정지, 출발점 복귀, 노트북 끄기를 한다(robot_control).
+평소에는 plant-review 서비스로 항상 켜 두고, 로봇은 이 화면에서 켠다(service/install_onboard_service.sh).
+
     ros2 run plant_observer_bringup review_server                 # http://<노트북 IP>:8080
     ros2 run plant_observer_bringup review_server --port 8000 --host 127.0.0.1   # 이 노트북에서만
+    ros2 run plant_observer_bringup review_server --no-control    # 기록만 보기 (버튼 숨김)
 
-같은 Wi-Fi의 휴대폰·PC 브라우저로 연다. 비밀번호가 없으니 믿을 수 있는 네트워크에서만 띄운다.
-ROS 노드가 아니라서 순찰 중이든 아니든 따로 켜고 끌 수 있다.
+같은 Wi-Fi의 휴대폰·PC 브라우저로 연다. ~/.config/plant_observer/panel_pin 파일에 숫자를 적어 두면
+로봇 제어 버튼에 그 PIN을 묻는다. 없으면 같은 네트워크의 누구나 로봇을 움직일 수 있다.
+순찰 기록은 ROS 없이 읽는다. 순찰 중이든 아니든 따로 켜고 끌 수 있다.
 """
 import argparse
 import csv
+import hmac
 import io
 import json
 import os
@@ -25,6 +31,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from plant_observer_bringup.change_compare import CHANGE_TYPES, VERDICT_TEXT, describe_changes
+from plant_observer_bringup.robot_control import ACTIONS, Controller
 
 REVIEWS_FILE = 'reviews.json'
 REVIEW_RESULTS = ['미확인', '확인 완료', '조치 필요', '오탐(변화 아님)', '재촬영 필요']
@@ -195,6 +202,21 @@ class Store:
                 })
         return items
 
+    def latest_lap(self):
+        """가장 최근 회차 요약 (제어 패널의 순찰 상태 표시용)."""
+        laps = sorted((d for d in os.listdir(self.capture_dir) if LAP_NAME.match(d)), reverse=True)
+        for lap in laps:
+            try:
+                with open(os.path.join(self.capture_dir, lap, 'result.json')) as f:
+                    result = json.load(f)
+                stops = result.get('stops', [])
+                return {'lap': lap, 'route': result.get('route'), 'finished': result.get('finished'),
+                        'home': result.get('home'), 'stops': len(stops),
+                        'failed': sum(1 for s in stops if isinstance(s, dict) and s.get('status') != 'ok')}
+            except (OSError, ValueError, AttributeError):
+                continue
+        return None
+
     def image_path(self, lap, name):
         path = os.path.realpath(os.path.join(self.capture_dir, lap, name))
         root = os.path.realpath(self.capture_dir)
@@ -216,7 +238,7 @@ def to_csv(items):
     return '﻿' + out.getvalue()
 
 
-def make_handler(store):
+def make_handler(store, controller=None, pin=None):
 
     class Handler(BaseHTTPRequestHandler):
 
@@ -244,6 +266,12 @@ def make_handler(store):
             elif url.path == '/api/observations':
                 self.send_json({'items': store.observations(), 'baselines': store.baselines(),
                                 'results': REVIEW_RESULTS})
+            elif url.path == '/api/control':
+                if controller is None:
+                    self.send_json({'enabled': False})
+                else:
+                    self.send_json({'enabled': True, 'pin_required': bool(pin), 'last_lap': store.latest_lap(),
+                                    **controller.status()})
             elif url.path == '/api/export.csv':
                 items = store.observations()
                 route = parse_qs(url.query).get('route', [''])[0]
@@ -260,6 +288,9 @@ def make_handler(store):
                 self.send(HTTPStatus.NOT_FOUND, 'not found', 'text/plain; charset=utf-8')
 
         def do_POST(self):
+            if urlparse(self.path).path == '/api/control':
+                self.control()
+                return
             if urlparse(self.path).path != '/api/review':
                 self.send(HTTPStatus.NOT_FOUND, 'not found', 'text/plain; charset=utf-8')
                 return
@@ -283,6 +314,26 @@ def make_handler(store):
                 return
             self.send_json(saved)
 
+        def control(self):
+            # JSON만 받는다: 다른 사이트의 폼이 이 노트북으로 몰래 명령을 보내지 못하게 (브라우저 사전 확인)
+            if controller is None or not self.headers.get('Content-Type', '').startswith('application/json'):
+                self.send_json({'message': '잘못된 요청'}, HTTPStatus.BAD_REQUEST)
+                return
+            if pin and not hmac.compare_digest(self.headers.get('X-Panel-Pin', ''), pin):
+                self.send_json({'message': 'PIN이 맞지 않습니다'}, HTTPStatus.FORBIDDEN)
+                return
+            try:
+                body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))))
+                action, laps = body['action'], int(body.get('laps', 1))
+            except (ValueError, KeyError, TypeError):
+                self.send_json({'message': '잘못된 요청'}, HTTPStatus.BAD_REQUEST)
+                return
+            if action not in ACTIONS:
+                self.send_json({'message': '알 수 없는 동작입니다'}, HTTPStatus.BAD_REQUEST)
+                return
+            ok, message = controller.run(action, laps)
+            self.send_json({'ok': ok, 'message': message}, HTTPStatus.OK if ok else HTTPStatus.CONFLICT)
+
     return Handler
 
 
@@ -301,6 +352,11 @@ def main():
     parser.add_argument('--capture-dir', default='~/plant_ws/captures')
     parser.add_argument('--host', default='0.0.0.0', help='127.0.0.1이면 이 노트북에서만 열린다 (기본 %(default)s)')
     parser.add_argument('--port', type=int, default=8080)
+    parser.add_argument('--route', default='demo_real3', help='순찰 시작 버튼이 도는 루트 (기본 %(default)s)')
+    parser.add_argument('--max-laps', type=int, default=5, help='한 번에 고를 수 있는 최대 회차 수')
+    parser.add_argument('--pin-file', default='~/.config/plant_observer/panel_pin',
+                        help='있으면 로봇 제어 버튼에 이 PIN을 묻는다 (기본 %(default)s)')
+    parser.add_argument('--no-control', action='store_true', help='로봇 제어 버튼 없이 기록만 보여 준다')
     # ros2 launch의 Node로 띄우면 뒤에 --ros-args ...가 붙는다. ROS 노드가 아니라 그 뒤는 버린다
     argv = sys.argv[1:]
     if '--ros-args' in argv:
@@ -310,12 +366,22 @@ def main():
     # 부팅 직후 자동 시작하면 아직 순찰 기록이 없을 수 있다. 빈 목록으로 띄우고 순찰이 같은 폴더에 쌓는다
     os.makedirs(capture_dir, exist_ok=True)
 
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(Store(capture_dir)))
+    pin = None
+    pin_path = os.path.expanduser(args.pin_file)
+    if os.path.isfile(pin_path):
+        with open(pin_path) as f:
+            pin = f.read().strip() or None
+    controller = None if args.no_control else Controller(args.route, args.max_laps)
+
+    server = ThreadingHTTPServer((args.host, args.port), make_handler(Store(capture_dir), controller, pin))
     # ros2 run으로 띄우면 출력이 버퍼에 쌓여 안 보이므로 바로 내보낸다
     print(f'관찰 기록 화면: http://localhost:{args.port}', flush=True)
     if args.host == '0.0.0.0' and (ip := lan_address()):
         print(f'같은 Wi-Fi의 다른 기기: http://{ip}:{args.port}', flush=True)
     print(f'기록 폴더 {capture_dir} · 끄려면 Ctrl-C', flush=True)
+    if controller is not None:
+        print(f"로봇 제어: 루트 {args.route} · {'PIN 사용' if pin else 'PIN 없음 (' + pin_path + ' 에 적으면 사용)'}",
+              flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -391,10 +457,22 @@ th { color: var(--muted); font-weight: 500; }
 .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .saved { color: var(--muted); font-size: 13px; }
 .empty { color: var(--muted); padding: 24px; }
+#control { padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--line);
+  display: grid; gap: 10px; }
+#control .row strong { min-width: 44px; }
+#control button { padding: 7px 14px; }
+#control button:disabled { opacity: .45; cursor: default; }
+button.danger { background: var(--check); color: #fff; border-color: var(--check); }
+.checks { display: flex; flex-wrap: wrap; gap: 4px; }
+.notice { font-size: 14px; }
+.notice.error { color: var(--check); }
+button.quiet { margin-left: auto; color: var(--muted); font-size: 13px; }
 @media (max-width: 760px) {
   main { grid-template-columns: 1fr; }
   #list { position: static; max-height: 40vh; border-right: 0; border-bottom: 1px solid var(--line); }
   .photos { grid-template-columns: 1fr; }
+  #control button { flex: 1 1 auto; padding: 10px 12px; }
+  #control button.quiet { flex: 0 0 auto; padding: 6px 10px; }
 }
 </style>
 </head>
@@ -412,6 +490,30 @@ th { color: var(--muted); font-weight: 500; }
     <a class="button" id="csv" href="/api/export.csv">기록 내려받기</a>
   </div>
 </header>
+<section id="control" hidden>
+  <div class="row">
+    <strong>로봇</strong><span id="robotState" class="badge k-none">-</span>
+    <span id="checks" class="checks"></span>
+  </div>
+  <div class="row">
+    <button id="robotStart" class="primary" type="button">로봇 켜기</button>
+    <button id="robotStop" type="button">로봇 끄기</button>
+  </div>
+  <div class="row">
+    <strong>순찰</strong><span id="patrolState" class="badge k-none">-</span>
+    <span id="lastLap" class="saved"></span>
+  </div>
+  <div class="row">
+    <select id="laps" aria-label="회차 수"></select>
+    <button id="patrolStart" class="primary" type="button">순찰 시작</button>
+    <button id="patrolStop" class="danger" type="button">정지</button>
+    <button id="home" type="button">출발점 복귀</button>
+  </div>
+  <div class="row">
+    <span id="controlMsg" class="notice"></span>
+    <button id="poweroff" class="quiet" type="button">노트북 끄기</button>
+  </div>
+</section>
 <main>
   <nav id="list"></nav>
   <section id="detail"><p class="empty">왼쪽에서 관찰 기록을 고르세요.</p></section>
@@ -532,6 +634,101 @@ $('filter').addEventListener('change', () => { remember('filter', $('filter').va
 $('reload').addEventListener('click', load);
 $('filter').value = recall('filter') || 'all';
 load();
+
+// ── 로봇 제어 ──
+const UNIT = { active: '켜짐', activating: '켜는 중', deactivating: '끄는 중', inactive: '꺼짐', failed: '오류로 꺼짐' };
+const UNIT_KIND = { active: 'k-ok', activating: 'k-growth', deactivating: 'k-growth', failed: 'k-check' };
+const CHECKS = [['wheels', '바퀴'], ['lidar', '라이다'], ['camera', '카메라'], ['nav2', 'Nav2'], ['localized', '위치']];
+const RUNNING = ['active', 'activating', 'deactivating', 'reloading'];
+let control = null, lastPatrol = null;
+
+function message(text, error) {
+  $('controlMsg').textContent = text || '';
+  $('controlMsg').classList.toggle('error', !!error);
+}
+
+function patrolText(c) {
+  const p = c.patrol;
+  if (p.state === 'active') return p.mode === 'home' ? '출발점 복귀 중' : `순찰 중 (${p.laps}회)`;
+  if (p.state === 'activating') return '시작 중';
+  if (p.state === 'deactivating') return '멈추는 중';
+  if (p.state === 'failed') return '실패 (로그 확인)';
+  return '대기';
+}
+
+function renderControl() {
+  const c = control;
+  if (!c.enabled) return;
+  $('control').hidden = false;
+  const robot = c.robot.state, patrol = c.patrol.state;
+  $('robotState').textContent = c.robot.installed ? (UNIT[robot] || robot) : '서비스 미설치';
+  $('robotState').className = 'badge ' + (UNIT_KIND[robot] || 'k-none');
+  $('checks').innerHTML = robot !== 'active' ? ''
+    : !c.ros || !c.ros.available ? '<span class="badge k-none">상태 확인 불가</span>'
+    : CHECKS.map(([k, name]) => `<span class="badge ${c.ros[k] ? 'k-ok' : 'k-check'}">${c.ros[k] ? '✓' : '✗'} ${name}</span>`).join('');
+  $('patrolState').textContent = patrolText(c);
+  $('patrolState').className = 'badge ' + (RUNNING.includes(patrol) ? 'k-growth' : patrol === 'failed' ? 'k-check' : 'k-none');
+  const l = c.last_lap;
+  $('lastLap').textContent = l ? `최근 ${lapTime(l.lap)} · ${l.stops}곳${l.failed ? ` (실패 ${l.failed})` : ''} · ${
+    !l.finished ? '끝나지 않음' : l.home === 'ok' ? '복귀 완료' : '복귀 실패'}` : '';
+  if ($('laps').options.length !== c.max_laps) {
+    $('laps').innerHTML = Array.from({ length: c.max_laps }, (_, i) => `<option value="${i + 1}">${i + 1}회</option>`).join('');
+  }
+  const ready = robot === 'active' && c.ros && c.ros.nav2 && c.ros.localized;
+  const busy = !!c.busy || !c.robot.installed;
+  $('robotStart').disabled = busy || RUNNING.includes(robot);
+  $('robotStop').disabled = busy || !['active', 'activating'].includes(robot);
+  $('patrolStart').disabled = $('home').disabled = busy || !ready || RUNNING.includes(patrol);
+  $('patrolStop').disabled = busy || !['active', 'activating'].includes(patrol);
+  $('poweroff').hidden = !['yes', 'challenge'].includes(c.can_poweroff);
+  $('poweroff').disabled = busy;
+  if (c.busy) message(c.busy + '…');
+  else if (c.notice) message(c.notice, true);
+  else if (robot === 'active' && !ready && !RUNNING.includes(patrol)) message('로봇 준비 중입니다. Nav2와 위치가 ✓가 되면 순찰할 수 있습니다');
+  // 순찰이 끝나면 새 회차가 보이도록 기록을 다시 읽는다
+  if (lastPatrol && RUNNING.includes(lastPatrol) && !RUNNING.includes(patrol)) load();
+  lastPatrol = patrol;
+}
+
+async function refreshControl() {
+  try {
+    const res = await fetch('/api/control');
+    if (!res.ok) return;
+    control = await res.json();
+    renderControl();
+  } catch (e) {
+    if (control && control.enabled) message('노트북과 연결이 끊겼습니다. 핫스팟 연결을 확인하세요', true);
+  }
+}
+
+async function act(action, confirmText) {
+  if (confirmText && !confirm(confirmText)) return;
+  const headers = { 'Content-Type': 'application/json' };
+  const pin = recall('pin');
+  if (pin) headers['X-Panel-Pin'] = pin;
+  let res;
+  try {
+    res = await fetch('/api/control', { method: 'POST', headers, body: JSON.stringify({ action, laps: +$('laps').value || 1 }) });
+  } catch (e) { message('노트북과 연결이 끊겼습니다', true); return; }
+  if (res.status === 403) {
+    const typed = prompt('로봇 제어 PIN');
+    if (!typed) return;
+    remember('pin', typed);
+    return act(action);
+  }
+  const body = await res.json().catch(() => ({ message: '응답 오류' }));
+  message(body.message, !res.ok);
+  refreshControl();
+}
+
+$('robotStart').addEventListener('click', () => act('robot_start'));
+$('robotStop').addEventListener('click', () => act('robot_stop', '로봇을 끌까요? 순찰 중이면 먼저 멈춥니다.'));
+$('patrolStart').addEventListener('click', () => act('patrol_start'));
+$('patrolStop').addEventListener('click', () => act('patrol_stop'));
+$('home').addEventListener('click', () => act('home'));
+$('poweroff').addEventListener('click', () => act('poweroff', '로봇을 끄고 노트북 전원을 끌까요? 다시 켜려면 노트북 전원 버튼을 눌러야 합니다.'));
+refreshControl();
+setInterval(refreshControl, 3000);
 </script>
 </body>
 </html>

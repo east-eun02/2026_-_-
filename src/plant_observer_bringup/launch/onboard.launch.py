@@ -1,9 +1,13 @@
-"""노트북을 차체에 올려 운용할 때 한 번에 띄운다: 로봇(robot.launch.py) + Nav2(nav2_session) + 관찰 기록 화면.
+"""노트북을 차체에 올려 운용할 때 한 번에 띄운다: 로봇(robot.launch.py) + Nav2(nav2_session).
+
+관찰 기록 화면은 plant-review 서비스로 따로 항상 떠 있고, 거기서 이 런치(plant-onboard)를 켜고 끈다.
+서비스 없이 터미널로 띄우면서 화면도 보려면 review:=true.
 
     ros2 launch plant_observer_bringup onboard.launch.py
+    ros2 launch plant_observer_bringup onboard.launch.py review:=true          # 관찰 기록 화면도 같이
     ros2 launch plant_observer_bringup onboard.launch.py map:=$HOME/plant_ws/maps/demo_real2.yaml
     ros2 launch plant_observer_bringup onboard.launch.py rviz:=true               # 선 연결해서 화면 볼 때
-    ros2 launch plant_observer_bringup onboard.launch.py nav2:=false review:=false # 로봇만 (= robot.launch.py)
+    ros2 launch plant_observer_bringup onboard.launch.py nav2:=false              # 로봇만 (= robot.launch.py)
 
 순찰은 시작하지 않고 대기한다. 순찰은 따로
     ros2 run plant_observer_bringup patrol_manager --ros-args -p route:=demo_real3
@@ -56,7 +60,8 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('map', default_value=os.path.expanduser('~/plant_ws/maps/demo_real3.yaml')),
         DeclareLaunchArgument('nav2', default_value='true'),
-        DeclareLaunchArgument('review', default_value='true', description='관찰 기록 화면 (휴대폰 브라우저)'),
+        DeclareLaunchArgument('review', default_value='false',
+                              description='관찰 기록 화면도 띄움 (plant-review 서비스가 떠 있으면 포트가 겹침)'),
         DeclareLaunchArgument('review_port', default_value='8080'),
         DeclareLaunchArgument('lidar', default_value='true'),
         DeclareLaunchArgument('camera', default_value='true'),

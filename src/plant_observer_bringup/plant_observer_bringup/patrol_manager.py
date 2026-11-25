@@ -28,6 +28,9 @@ AMCL 위치(nav2_params.yaml의 initial_pose, 보통 지도 원점)가 home에�
 떨어져 있으면 home을 /initialpose로 보낸다. 지도 원점이 출발점이 아닌 지도(demo_real2)도
 RViz 2D Pose Estimate 없이 돌릴 수 있다. 직전 회차로 home에 돌아와 있으면 보내지 않는다.
 
+home_only:=true면 사진 없이 출발점으로만 돌아간다(관찰 기록 화면의 '출발점 복귀' 버튼).
+로봇이 home에 있지 않으므로 이때는 home을 초기 위치로 보내지 않는다.
+
     ros2 run plant_observer_bringup patrol_manager --ros-args -p route:=greenhouse -p use_sim_time:=true
 """
 import json
@@ -192,6 +195,7 @@ class PatrolManager(BasicNavigator):
         self.settle_time = p('settle_time', 1.0).value
         self.image_timeout = p('image_timeout', 5.0).value
         self.laps = p('laps', 1).value
+        self.home_only = p('home_only', False).value
         # 이동 실패 시 같은 지점을 몇 번 더 시도할지. 일시적인 계획 실패는 대부분 재시도로 넘어간다
         self.nav_retries = p('nav_retries', 1).value
         self.capture_behavior_tree = os.path.join(
@@ -763,6 +767,14 @@ class PatrolManager(BasicNavigator):
         return prioritize_stops(self.stops, history, reviews)
 
     def run(self):
+        if getattr(self, 'home_only', False):
+            # 순찰을 멈춘 자리에서 돌아오는 경우라 AMCL 위치를 home으로 덮어쓰면 안 된다
+            self.set_initial_pose = False
+            self.wait_ready()
+            self.get_logger().info('출발점으로 복귀')
+            result = self.go(self.home)
+            self.get_logger().info('출발점 복귀 ' + ('ok' if result == TaskResult.SUCCEEDED else '실패'))
+            return
         self.wait_ready()
         self.get_logger().info(f'루트 {self.route_path}, {self.laps}회 순찰, 사진 회전 {self.image_rotation}°')
         if getattr(self, 'model_fallback', None) is not None:
@@ -789,6 +801,8 @@ def main():
     # 파이썬 기본 동작(KeyboardInterrupt)으로 받아 목표를 취소해 로봇을 세운 뒤 끝낸다
     rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     signal.signal(signal.SIGHUP, raise_keyboard_interrupt)
+    # systemd(관찰 기록 화면의 정지 버튼)가 SIGTERM을 보내도 Ctrl-C처럼 이동을 취소하고 끝낸다
+    signal.signal(signal.SIGTERM, raise_keyboard_interrupt)
     node = None
     try:
         node = PatrolManager()
