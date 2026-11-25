@@ -12,6 +12,8 @@
 옆면은 관리자 확인용 자료이며 비교·자동 확정에 사용하지 않는다. final은 정면 판정만 담는다.
 정상 비교가 불가능한 정면만 사전학습 모델(YOLO) 영역으로 보조한다(기본 켜짐, 끄려면 model_fallback:=false).
 모델 결과는 변화 없음이어도 관리자 확인 필요로 남기며, 원래 실패 사유와 모델 정보를 보존한다.
+열매 생성·손상·탈락은 사과 검출 모델(apple_weights, 기본 models/apple_yolo26n_aug_v1.pt)로 판정한다
+(끄려면 apple_model:=false). 모델이 없거나 실패하면 색 규칙으로 판정하고 compare.apple_model에 남긴다.
 회차 시작 때 같은 루트의 기록과 관리자 확인 결과로 방문 순서를 정한다:
 관리자 조치·재촬영 요청 → 미확인 변화(최근 감지 순) → 최근 관측 실패 → 나머지.
 직전 사진과 같다는 이유만으로 미확인 변화를 지우지 않는다. 확인 완료·오탐 표시로 해제한다.
@@ -216,6 +218,11 @@ class PatrolManager(BasicNavigator):
         model_timeout = p('model_timeout', 20.0).value
         self.model_fallback = (ModelFallback(model_python, model_weights, model_timeout)
                                if model_enabled and self.compare else None)
+        # 열매 판정은 사과 검출 모델로 한다(기본 켜짐). 모델이 실패하면 색 규칙으로 판정한다
+        from plant_observer_bringup.apple_detector import AppleDetector, DEFAULT_APPLE_WEIGHTS
+        apple_weights = p('apple_weights', DEFAULT_APPLE_WEIGHTS).value
+        self.apple_detector = (AppleDetector(model_python, apple_weights, model_timeout)
+                               if p('apple_model', True).value and self.compare else None)
         self.capture_baseline = p('capture_baseline', False).value
         if self.capture_baseline and self.laps != 1:
             raise ValueError('기준 등록은 laps:=1로 한 번만 실행하세요')
@@ -551,7 +558,8 @@ class PatrolManager(BasicNavigator):
                 self.capture_dir, self.route, folder, stop_id, os.path.join(folder, image), out_name=out_name,
                 use_baseline=self.compare_to == 'baseline', view_id=view_id,
                 reference_lap=reference_lap, current_pose=current_pose,
-                model_fallback=getattr(self, 'model_fallback', None))
+                model_fallback=getattr(self, 'model_fallback', None),
+                apple_detector=getattr(self, 'apple_detector', None))
         except Exception as e:  # noqa: BLE001 — 사진 비교 오류로 로봇이 멈추면 안 된다
             self.get_logger().error(f'{stop_id}: 비교 중 오류 {e!r}')
             return {'status': 'error', 'error': repr(e)}
@@ -759,6 +767,12 @@ class PatrolManager(BasicNavigator):
         self.get_logger().info(f'루트 {self.route_path}, {self.laps}회 순찰, 사진 회전 {self.image_rotation}°')
         if getattr(self, 'model_fallback', None) is not None:
             self.get_logger().info('정면 비교 실패 시 모델 보조 활성화 — 모든 보조 결과는 관리자 확인 필요')
+        detector = getattr(self, 'apple_detector', None)
+        if detector is not None:
+            if detector.available():
+                self.get_logger().info(f'열매 판정: 사과 모델 {detector.weights}')
+            else:
+                self.get_logger().warn(f'사과 모델 또는 실행 환경 없음({detector.weights}) — 열매는 색 규칙으로 판정')
         for lap in range(1, self.laps + 1):
             summary = self.run_lap(lap)
             # All modes return only after final results and any baseline marker are saved.
@@ -792,6 +806,8 @@ def main():
         if node is not None:
             if getattr(node, 'model_fallback', None) is not None:
                 node.model_fallback.close()
+            if getattr(node, 'apple_detector', None) is not None:
+                node.apple_detector.close()
             node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

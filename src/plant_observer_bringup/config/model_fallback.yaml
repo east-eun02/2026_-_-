@@ -5,3 +5,6 @@ patrol_manager:
     model_python: ~/plant_ws/.model_runtime/bin/python
     model_weights: ~/plant_ws/models/yolo11n-seg.pt
     model_timeout: 20.0
+    # 열매 판정용 사과 검출 모델(팀원 학습 YOLO26n). apple_model: false면 색 규칙만 쓴다
+    apple_model: true
+    apple_weights: ~/plant_ws/models/apple_yolo26n_aug_v1.pt

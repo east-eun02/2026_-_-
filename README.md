@@ -26,7 +26,10 @@ bash setup_robot_linux.sh --with-gazebo   # 라이다 드라이버(sllidar_ros2)
 
 설치가 끝나면 재부팅합니다. 이후 새 터미널에서 `plant` 명령으로 작업공간을 활성화합니다.
 
-YOLO 가중치는 저장소에 포함하지 않습니다. `~/plant_ws/models/yolo11n-seg.pt`에 Ultralytics 공식 가중치를 넣어 주세요.
+YOLO 가중치는 저장소에 포함하지 않습니다. `~/plant_ws/models/`에 다음 두 파일을 넣어 주세요.
+
+- `yolo11n-seg.pt`: Ultralytics 공식 가중치 (정면 비교 실패 시 식물 영역 보조)
+- `apple_yolo26n_aug_v1.pt`: 팀에서 학습한 사과 검출 모델 (`normal_apple`/`abnormal_apple`, 열매 생성·손상·탈락 판정). 없으면 열매는 색 규칙으로 판정합니다.
 
 ## 실행
 

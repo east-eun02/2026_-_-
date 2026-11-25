@@ -29,8 +29,10 @@ def padded_box(mask):
     return result
 
 
-class ModelFallback:
-    """One private worker per patrol process. Failure leaves the primary result intact."""
+class WorkerProcess:
+    """Lazily started JSON-lines worker in the model venv, one per patrol process."""
+
+    WORKER = 'model_worker.py'
 
     def __init__(self, python=DEFAULT_PYTHON, weights=DEFAULT_WEIGHTS, timeout=20., worker=None):
         if not math.isfinite(timeout) or timeout <= 0:
@@ -38,7 +40,7 @@ class ModelFallback:
         self.python = os.path.expanduser(python)
         self.weights = os.path.expanduser(weights)
         self.timeout = float(timeout)
-        self.worker = worker or str(Path(__file__).with_name('model_worker.py'))
+        self.worker = worker or str(Path(__file__).with_name(self.WORKER))
         self.process = None
         self.stderr = None
         self.buffer = b''
@@ -95,6 +97,25 @@ class ModelFallback:
                 self.buffer += chunk
                 if len(self.buffer) > 1024*1024:
                     raise ValueError('모델 응답 크기 초과')
+
+    def request(self, payload, deadline):
+        """Send one request and return its successful response. Errors close the worker."""
+        try:
+            self._start()
+            request_id = uuid.uuid4().hex
+            self.process.stdin.write((json.dumps({**payload, 'id': request_id})+'\n').encode())
+            self.process.stdin.flush()
+            response = self._receive(request_id, deadline)
+            if not response.get('ok'):
+                raise ValueError(response.get('error', '모델 추론 실패'))
+            return response
+        except BaseException:
+            self.close()
+            raise
+
+
+class ModelFallback(WorkerProcess):
+    """Plant-region model used only when the primary comparison fails. Failure leaves the primary result intact."""
 
     def masks(self, before, after):
         start = time.monotonic()
