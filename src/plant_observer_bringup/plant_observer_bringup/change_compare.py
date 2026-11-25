@@ -21,11 +21,14 @@ patrol_manager가 남긴 <capture_dir>/<회차>/<지점 ID>.png 와 result.json�
      색상(H)은 조명에 따라 사과와 갈변 잎이 겹쳐서 색의 진하기(Lab 채도)로 가른다.
      정렬 오차로 생긴 가는 띠·밀려 보인 줄기는 버린다. 한 지점에 여러 종류가 함께 나올 수 있다
      (changes = {종류: 개수}, 면적 큰 순). 이번 사진이 90°·180° 돌아가 있어도 맞춘다.
-  4. 사과 모델(apple_detector)이 있으면 열매 판정은 모델이 한다. 두 사진의 사과 박스를 정렬 결과로
+  4. 검출 모델(plant_detector)이 있으면 열매 판정은 사과 모델이 한다. 두 사진의 사과 박스를 정렬 결과로
      기준 사진 좌표에 옮겨 짝짓고(apple_changes) 새 정상 사과 → 열매 생성, 새 상한 사과·정상→상한 →
      열매 손상, 사라진 사과 → 열매 탈락으로 센다. 빨강이 거의 없는 normal_apple 박스(갈변 잎)는 버리고,
      박스 안 색이 거의 안 바뀐 사과 변화(한쪽 사진에서 모델이 놓친 것)는 세지 않는다. 사과 박스 안의
      색 변화 덩어리는 세지 않고, 사과 박스 밖에서 색 규칙이 열매로 본 덩어리는 잎 색 변화로 센다.
+     잎 모델이 있으면 잎 탈락도 모델이 한다: 기준 사진의 정상 잎이 이번 사진에 없고 박스 안 색이 실제로
+     바뀌었으며 그 자리에 새 물체가 없으면 잎 탈락. 사과가 정상 잎으로 나오므로 사과 박스 안의 잎은 버린다.
+     잎 색 변화는 잎 모델이 갈변 잎을 거의 못 잡아 계속 색 규칙으로 센다.
      모델이 실패하면 3의 색 규칙을 그대로 쓴다.
 
 결과는 <이번 회차>/compare_<기준 회차>/ 아래에 <지점 ID>.jpg(기준 | 이번 정렬 | 변화 표시)와 compare.json.
@@ -112,6 +115,20 @@ APPLE_MIN_RED = 0.05
 # 사과 변화 박스 안에서 색이 바뀐(ΔE > delta_e) 픽셀 비율이 이보다 작으면 사과가 그대로인데 한쪽 사진에서
 # 모델이 놓친 것이다. 같은 21쌍에서 실제 변화 0.35~0.73, 상한 사과를 한쪽에서 놓친 경우 0.00~0.02였다
 APPLE_MIN_CHANGE = 0.15
+# 기준 사진의 잎이 이번 사진에 없고 박스 안 색이 이 비율 이상 바뀌어야 잎 탈락. 실물 112쌍(2026-10-31~11-04)에서
+# 실제로 뗀 잎 0.50~0.78, 이번 사진에서 모델이 놓친 잎 0.00, 곡면 보드 가장자리에서 밀려 보인 잎 0.11~0.27
+# (0.48인 2026-10-31_020505 P00은 아래쪽 잎을 떼어 위쪽에 옮겨 붙인 경우라 탈락으로 센다)
+LEAF_MIN_CHANGE = 0.45
+# 사라진 잎 자리를 새 물체(갈변 잎·사과)가 이 비율 이상 덮으면 탈락이 아니라 교체다(잎 색 변화·열매로 센다).
+# 같은 112쌍에서 실제로 뗀 잎 0.00~0.20, 갈변 잎으로 바꿔 붙인 자리 0.32~0.53
+LEAF_MAX_REPLACED = 0.25
+# 사라진 잎 자리에 기준 사진 초록의 이 비율 이상이 남아 있으면 잎이 밀려 보인 것이다(실제로 뗀 잎 0.00~0.21).
+# 밝은 조명(2026-11-04)에서는 color_classes가 진한 초록 잎을 GREEN으로 못 봐서, 기준 사진 초록이
+# LEAF_GREEN_READABLE보다 적으면 이 확인을 건너뛴다. 같은 이유로 초록 비율로 잎 박스를 거르지 않는다
+LEAF_MAX_GREEN_LEFT = 0.5
+LEAF_GREEN_READABLE = 0.05
+# 잎은 서로 붙어 있어 사과보다 좁게 짝짓는다
+LEAF_MATCH_RATIO = 0.5
 
 
 def color_classes(bgr):
@@ -372,8 +389,8 @@ def rotated_points(points, code, size):
     return points
 
 
-def place_apples(detections, transform, inside):
-    """원본 좌표 사과 박스 → 기준 사진 작업 좌표 박스. 중심이 inside(작업 좌표 마스크) 밖이면 버린다."""
+def place_boxes(detections, transform, inside):
+    """원본 좌표 검출 박스 → 기준 사진 작업 좌표 박스. 중심이 inside(작업 좌표 마스크) 밖이면 버린다."""
     placed = []
     for found in detections:
         x1, y1, x2, y2 = found['bbox']
@@ -385,36 +402,53 @@ def place_apples(detections, transform, inside):
     return placed
 
 
+def match_boxes(before, after, ratio):
+    """같은 좌표계 두 사진의 검출을 가까운 쌍부터 짝짓는다. ([(기준 i, 이번 j)], 기준만 i, 이번만 j)."""
+    def center(box):
+        return (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+
+    pairs = sorted((math.dist(center(b['bbox']), center(a['bbox'])), i, j)
+                   for i, b in enumerate(before) for j, a in enumerate(after))
+    matched, used_before, used_after = [], set(), set()
+    for distance, i, j in pairs:
+        if i in used_before or j in used_after:
+            continue
+        b, a = before[i]['bbox'], after[j]['bbox']
+        side = (b[2] - b[0] + b[3] - b[1] + a[2] - a[0] + a[3] - a[1]) / 4
+        if distance > ratio * side:
+            continue
+        used_before.add(i)
+        used_after.add(j)
+        matched.append((i, j))
+    return (matched, [i for i in range(len(before)) if i not in used_before],
+            [j for j in range(len(after)) if j not in used_after])
+
+
 def apple_changes(before, after):
     """같은 좌표계로 옮긴 두 사진의 사과를 짝지어 [(변화 종류, 박스)]. 박스는 [x1, y1, x2, y2].
 
     가까운 쌍부터 짝짓는다. 새로 보인 사과는 정상이면 열매 생성, 상한 것이면 열매 손상.
     정상이던 사과가 상하면 열매 손상, 기준에만 있던 사과는 열매 탈락.
     """
-    def center(box):
-        return (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
-
-    pairs = sorted((math.dist(center(b['bbox']), center(a['bbox'])), i, j)
-                   for i, b in enumerate(before) for j, a in enumerate(after))
-    matched_before, matched_after, changes = set(), set(), []
-    for distance, i, j in pairs:
-        if i in matched_before or j in matched_after:
-            continue
-        b, a = before[i]['bbox'], after[j]['bbox']
-        side = (b[2] - b[0] + b[3] - b[1] + a[2] - a[0] + a[3] - a[1]) / 4
-        if distance > APPLE_MATCH_RATIO * side:
-            continue
-        matched_before.add(i)
-        matched_after.add(j)
-        if before[i]['class'] == 'normal_apple' and after[j]['class'] == 'abnormal_apple':
-            changes.append(('fruit_damaged', a))
-    for j, a in enumerate(after):
-        if j not in matched_after:
-            changes.append(('fruit_damaged' if a['class'] == 'abnormal_apple' else 'fruit_added', a['bbox']))
-    for i, b in enumerate(before):
-        if i not in matched_before:
-            changes.append(('fruit_lost', b['bbox']))
+    matched, only_before, only_after = match_boxes(before, after, APPLE_MATCH_RATIO)
+    changes = [('fruit_damaged', after[j]['bbox']) for i, j in matched
+               if before[i]['class'] == 'normal_apple' and after[j]['class'] == 'abnormal_apple']
+    changes += [('fruit_damaged' if after[j]['class'] == 'abnormal_apple' else 'fruit_added', after[j]['bbox'])
+                for j in only_after]
+    changes += [('fruit_lost', before[i]['bbox']) for i in only_before]
     return changes
+
+
+def leaf_changes(before, after):
+    """기준 사진의 정상 잎 중 이번 사진에서 짝이 없는 것 [('leaf_loss', 박스)]. 새 잎·비정상 잎은 세지 않는다."""
+    _, only_before, _ = match_boxes(before, after, LEAF_MATCH_RATIO)
+    return [('leaf_loss', before[i]['bbox']) for i in only_before if before[i]['class'] == 'normal_leaf']
+
+
+def box_slice(box, shape):
+    x1, y1 = max(0, round(box[0])), max(0, round(box[1]))
+    x2, y2 = min(shape[1] - 1, round(box[2])), min(shape[0] - 1, round(box[3]))
+    return slice(y1, y2 + 1), slice(x1, x2 + 1)
 
 
 def red_fraction(bgr, box):
@@ -428,8 +462,12 @@ def red_fraction(bgr, box):
     return float(((np.hypot(a, b) >= FRUIT_MIN_CHROMA) & (np.degrees(np.arctan2(b, a)) < FRUIT_MAX_HUE_ANGLE)).mean())
 
 
+def counts(found, kinds):
+    return {kind: sum(a['class'] == kind for a in found) for kind in kinds}
+
+
 def apple_counts(apples):
-    return {kind: sum(a['class'] == kind for a in apples) for kind in ('normal_apple', 'abnormal_apple')}
+    return counts(apples, ('normal_apple', 'abnormal_apple'))
 
 
 def draw_label(image, text, org, color):
@@ -521,23 +559,37 @@ def compare_stop(before_path, after_path, args):
     valid = (cv2.warpPerspective(board_after, homography, (w, h)) == 255) & (board_before > 0)
     if board is not None and valid.sum() < 0.85 * (board_before > 0).sum():
         return {**scope, 'status': 'align_failed', 'reason': '정렬한 두 보드의 겹치는 영역 부족'}, None
-    apples = None
-    if getattr(args, 'apples_before', None) is not None and getattr(args, 'apples_after', None) is not None:
-        # 두 사진 모두 보이는 화분 영역 안의 사과만 센다(벽 너머·보드 밖 사과 제외)
+    def given(name):
+        found = (getattr(args, f'{name}_before', None), getattr(args, f'{name}_after', None))
+        return None if None in found else found
+
+    apples = leaves = None
+    if given('apples') or given('leaves'):
+        # 두 사진 모두 보이는 화분 영역 안의 검출만 센다(벽 너머·보드 밖 제외)
         inside = valid & roi_before.astype(bool)
         sx, sy = w / before_full.shape[1], h / before_full.shape[0]
         code = next(c for angle, c in ROTATIONS if angle == rotation)
         turned = after_full.shape[1::-1] if code in (None, cv2.ROTATE_180) else after_full.shape[:2]
         ax, ay = after.shape[1] / turned[0], after.shape[0] / turned[1]
-        apples = (place_apples(args.apples_before, lambda p: p * np.float32([sx, sy]), inside),
-                  place_apples(args.apples_after, lambda p: cv2.perspectiveTransform(
-                      (rotated_points(p, code, after_full.shape[1::-1]) * np.float32([ax, ay]))[None],
-                      homography)[0], inside))
+
+        def to_reference(p):
+            return p * np.float32([sx, sy])
+
+        def to_current(p):
+            return cv2.perspectiveTransform(
+                (rotated_points(p, code, after_full.shape[1::-1]) * np.float32([ax, ay]))[None], homography)[0]
+
+        def place(found):
+            return place_boxes(found[0], to_reference, inside), place_boxes(found[1], to_current, inside)
+    if given('leaves'):
+        leaves = place(given('leaves'))
+    apple_area = np.zeros((h, w), bool)
+    if given('apples'):
+        apples = place(given('apples'))
         for found, image in [(a, before) for a in apples[0]] + [(a, warped) for a in apples[1]]:
             found['red'] = round(red_fraction(image, found['bbox']), 3)
         apples = tuple([a for a in group if a['class'] != 'normal_apple' or a['red'] >= APPLE_MIN_RED]
                        for group in apples)
-        apple_area = np.zeros((h, w), bool)
         for found in apples[0] + apples[1]:
             x1, y1, x2, y2 = (round(v) for v in found['bbox'])
             apple_area[max(0, y1):y2 + 1, max(0, x1):x2 + 1] = True
@@ -546,6 +598,11 @@ def compare_stop(before_path, after_path, args):
     margin = max(2, args.shift + 3) if board is not None else 2
     valid = cv2.erode(valid.astype(np.uint8), np.ones((2 * margin + 1, 2 * margin + 1), np.uint8)).astype(bool)
     classes_after = color_classes(cv2.warpPerspective(after_vivid, homography, (w, h)))
+    if leaves is not None:
+        # 사과가 정상 잎으로 나온다(0.60). 중심이 사과 박스 안인 잎은 버린다
+        leaves = tuple([a for a in group if not apple_area[round((a['bbox'][1] + a['bbox'][3]) / 2),
+                                                           round((a['bbox'][0] + a['bbox'][2]) / 2)]]
+                       for group in leaves)
     hsv = cv2.cvtColor(cv2.GaussianBlur(warped, (5, 5), 0), cv2.COLOR_BGR2HSV).astype(np.int16)
     hsv_before = cv2.cvtColor(cv2.GaussianBlur(before, (5, 5), 0), cv2.COLOR_BGR2HSV).astype(np.int16)
     # 연한 분홍빛 갈변 잎(실물 S 70~84)은 어느 식물 색에도 안 들어가 비교 영역에서 빠졌다.
@@ -626,7 +683,38 @@ def compare_stop(before_path, after_path, args):
         if real(blob, False) and not (blob & near_new).any():
             found.append(('leaf_loss', blob))
 
+    leaf_losses, leaf_trace = [], []
+    lost_area = np.zeros((h, w), bool)
+    if leaves is not None:
+        # 사라진 잎 자리에 새 물체(색 규칙이 찾은 갈변 잎·열매, 이번 사진 사과)가 있으면 교체다
+        replaced = new_objects.copy()
+        for found_apple in (apples[1] if apples is not None else []):
+            replaced[box_slice(found_apple['bbox'], (h, w))] = True
+        for kind, box in leaf_changes(*leaves):
+            area = box_slice(box, (h, w))
+            seen = valid[area]
+            moved = float((delta[area] > args.delta_e)[seen].mean()) if seen.any() else 0.
+            covered = float(replaced[area].mean())
+            green_then = float((classes_before[area] == GREEN).mean())
+            green_now = float((classes_after[area] == GREEN).mean())
+            # 잎이 밀려 보인 것(곡면 보드 가장자리 정렬 오차)이면 그 자리에 초록이 그대로 남아 있다
+            kept_green = green_now / green_then if green_then >= LEAF_GREEN_READABLE else None
+            counted = (moved >= LEAF_MIN_CHANGE and covered < LEAF_MAX_REPLACED
+                       and (kept_green is None or kept_green < LEAF_MAX_GREEN_LEFT))
+            leaf_trace.append({'type': kind, 'changed_fraction': round(moved, 3),
+                               'replaced_fraction': round(covered, 3),
+                               'green_left': None if kept_green is None else round(kept_green, 3),
+                               'counted': counted})
+            if counted:
+                leaf_losses.append((kind, box))
+                lost_area[area] = True
+
     for kind, blob in found:
+        if leaves is not None and kind == 'leaf_loss':
+            continue   # 잎 탈락은 잎 모델이 판정한다
+        # 잎 모델이 확인한 잎 탈락 자리에 남은 색 변화(잎이 떨어진 자국)는 따로 세지 않는다
+        if leaves is not None and (blob & lost_area).sum() >= APPLE_OVERLAP * blob.sum():
+            continue
         if apples is not None:
             # 사과는 사과 모델이 판정한다. 사과 박스 밖에서 색 규칙이 열매로 본 것은 붉게 변한 잎이다
             if (blob & apple_area).sum() >= APPLE_OVERLAP * blob.sum():
@@ -651,24 +739,31 @@ def compare_stop(before_path, after_path, args):
         # 원본 사진 픽셀 좌표로 기록
         objects.append({'type': kind, 'bbox': [round(v / scale) for v in (x, y, bw, bh)],
                         'area_px': round(area / scale ** 2)})
+    def add_model_change(kind, box, source):
+        ys, xs = box_slice(box, (h, w))
+        keep[ys, xs] |= region[ys, xs]
+        color = OVERLAY_COLORS[kind]
+        cv2.rectangle(overlay, (xs.start, ys.start), (xs.stop - 1, ys.stop - 1), color, 2)
+        draw_label(overlay, kind, (xs.start, max(14, ys.start - 4)), color)
+        bw, bh = xs.stop - xs.start, ys.stop - ys.start
+        objects.append({'type': kind, 'bbox': [round(v / scale) for v in (xs.start, ys.start, bw, bh)],
+                        'area_px': round(bw * bh / scale ** 2), 'source': source})
+
+    def changed_fraction(box):
+        ys, xs = box_slice(box, (h, w))
+        seen = valid[ys, xs]
+        return float((delta[ys, xs] > args.delta_e)[seen].mean()) if seen.any() else 0.
+
     if apples is not None:
         apple_trace = []
         for kind, box in apple_changes(*apples):
-            x1, y1 = max(0, round(box[0])), max(0, round(box[1]))
-            x2, y2 = min(w - 1, round(box[2])), min(h - 1, round(box[3]))
-            seen = valid[y1:y2 + 1, x1:x2 + 1]
-            moved = float((delta[y1:y2 + 1, x1:x2 + 1] > args.delta_e)[seen].mean()) if seen.any() else 0.
+            moved = changed_fraction(box)
             apple_trace.append({'type': kind, 'changed_fraction': round(moved, 3),
                                 'counted': moved >= APPLE_MIN_CHANGE})
-            if moved < APPLE_MIN_CHANGE:
-                continue
-            keep[y1:y2 + 1, x1:x2 + 1] |= region[y1:y2 + 1, x1:x2 + 1]
-            color = OVERLAY_COLORS[kind]
-            cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 2)
-            draw_label(overlay, kind, (x1, max(14, y1 - 4)), color)
-            bw, bh = x2 - x1 + 1, y2 - y1 + 1
-            objects.append({'type': kind, 'bbox': [round(v / scale) for v in (x1, y1, bw, bh)],
-                            'area_px': round(bw * bh / scale ** 2), 'source': 'apple_model'})
+            if moved >= APPLE_MIN_CHANGE:
+                add_model_change(kind, box, 'apple_model')
+    for kind, box in leaf_losses:
+        add_model_change(kind, box, 'leaf_model')
 
     # 한 지점에 여러 종류가 함께 생길 수 있다(예: 잎 색 변화 4 + 열매 손상 2). 종류별 개수를 면적 큰 순으로.
     # 종류가 정해진 변화가 하나라도 있으면 기타 변화는 뺀다
@@ -696,11 +791,22 @@ def compare_stop(before_path, after_path, args):
         entry['fruit_source'] = 'apple_model'
         entry['apples'] = {'reference': apple_counts(apples[0]), 'current': apple_counts(apples[1]),
                            'changes_checked': apple_trace}
+    if leaves is not None:
+        entry['leaf_loss_source'] = 'leaf_model'
+        kinds = ('normal_leaf', 'abnormal_leaf')
+        entry['leaves'] = {'reference': counts(leaves[0], kinds), 'current': counts(leaves[1], kinds),
+                           'changes_checked': leaf_trace}
     entry['color_correction'] = {
         name: {'wb_gains_bgr': [round(float(g), 3) for g in gains], 'sat_scale': round(sat, 3)}
         for name, (gains, sat) in (('reference', correction_before), ('current', correction_after))}
 
     panels = [before, warped, overlay]
+    if leaves is not None:
+        for panel, group in ((before, leaves[0]), (warped, leaves[1])):
+            for found in group:
+                ys, xs = box_slice(found['bbox'], (h, w))
+                cv2.rectangle(panel, (xs.start, ys.start), (xs.stop - 1, ys.stop - 1),
+                              (60, 200, 60) if found['class'] == 'normal_leaf' else (0, 140, 255), 1)
     if board is not None:
         contours, _ = cv2.findContours(board_before, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for panel in panels:
@@ -845,14 +951,22 @@ def reference_image(capture_dir, route, stop_id, current_folder, use_baseline=Fa
     return stop_image(lap) if lap else None
 
 
+def set_detections(options, found):
+    """plant_detector.detect() 결과를 compare_stop 옵션(apples_*/leaves_*)으로. 없는 모델은 색 규칙."""
+    for model, prefix in (('apple', 'apples'), ('leaf', 'leaves')):
+        pair = (found or {}).get(model) or (None, None)
+        setattr(options, f'{prefix}_before', pair[0])
+        setattr(options, f'{prefix}_after', pair[1])
+
+
 def compare_with_baseline(capture_dir, route, lap_folder, stop_id, image_path, params=None, out_name=None,
                           use_baseline=False, view_id='front', reference_lap=None,
                           current_pose=None, max_pose_distance=0.20, max_pose_yaw=0.35,
-                          model_fallback=None, apple_detector=None):
+                          model_fallback=None, plant_detector=None):
     """방금 찍은 사진을 비교 기준 사진(기본: 직전 촬영)과 비교한다. patrol_manager가 지점마다 부른다.
 
     비교 그림은 <lap_folder>/<out_name>, 기본 <지점 ID>_compare.jpg. 기준 사진이 없으면 status 'no_reference'.
-    apple_detector가 있으면 열매 판정을 사과 모델로 하고, 실패하면 색 규칙으로 판정한다(apple_model에 기록).
+    plant_detector가 있으면 열매는 사과 모델, 잎 탈락은 잎 모델로 판정하고, 실패하면 색 규칙으로 판정한다(detector에 기록).
     """
     reference = reference_image(capture_dir, route, stop_id, lap_folder, use_baseline,
                                 view_id, reference_lap)
@@ -881,9 +995,10 @@ def compare_with_baseline(capture_dir, route, lap_folder, stop_id, image_path, p
     except BoardNotFound as exc:
         return {**metadata, 'comparison_scope': 'board', 'status': 'board_not_found', 'reason': str(exc)}
     options = SimpleNamespace(**{**DEFAULTS, **(params or {}), 'board': board})
-    apple_trace = None
-    if apple_detector is not None:
-        options.apples_before, options.apples_after, apple_trace = apple_detector.detect(reference_path, image_path)
+    detector_trace = None
+    if plant_detector is not None:
+        found, detector_trace = plant_detector.detect(reference_path, image_path)
+        set_detections(options, found)
     entry, picture = compare_stop(reference_path, image_path, options)
     # Never replace a valid primary verdict, a missing reference/photo, invalid
     # board configuration, or a side-view pose mismatch with model inference.
@@ -900,8 +1015,8 @@ def compare_with_baseline(capture_dir, route, lap_folder, stop_id, image_path, p
             else:
                 entry = {**entry, 'model_fallback': trace}
     entry = {**metadata, **entry}
-    if apple_trace is not None:
-        entry['apple_model'] = apple_trace
+    if detector_trace is not None:
+        entry['detector'] = detector_trace
     if picture is not None:
         entry['image'] = out_name or f'{stop_id}_compare.jpg'
         cv2.imwrite(os.path.join(lap_folder, entry['image']), picture)
@@ -934,6 +1049,8 @@ def main():
                         help='정렬 오차 허용 픽셀 (640px 기준, 기본 %(default)s)')
     parser.add_argument('--apple-weights', metavar='PT',
                         help='사과 모델 가중치. 주면 열매 판정을 사과 모델로 한다 (예: ~/plant_ws/models/apple_yolo26n_aug_v1.pt)')
+    parser.add_argument('--leaf-weights', metavar='PT',
+                        help='잎 모델 가중치. 주면 잎 탈락 판정을 잎 모델로 한다 (예: ~/plant_ws/models/leaf_yolo26n_aug_v5.pt)')
     parser.add_argument('--model-python', default=None, help='모델 실행 환경 python (기본 ~/plant_ws/.model_runtime/bin/python)')
     args = parser.parse_args()
     capture_dir = os.path.expanduser(args.capture_dir)
@@ -963,9 +1080,9 @@ def main():
     print(f'기준 {before_dir}\n이번 {after_dir}')
 
     detector = None
-    if args.apple_weights:
-        from plant_observer_bringup.apple_detector import AppleDetector, DEFAULT_PYTHON
-        detector = AppleDetector(args.model_python or DEFAULT_PYTHON, args.apple_weights, timeout=60.)
+    if args.apple_weights or args.leaf_weights:
+        from plant_observer_bringup.plant_detector import DEFAULT_PYTHON, PlantDetector
+        detector = PlantDetector(args.model_python or DEFAULT_PYTHON, args.apple_weights, args.leaf_weights, timeout=60.)
     results = []
     for stop in after_lap['stops']:
         sid = stop['id']
@@ -975,16 +1092,17 @@ def main():
         else:
             before_path = os.path.join(before_dir, prev['image'])
             after_path = os.path.join(after_dir, stop['image'])
-            apple_trace = None
+            detector_trace = None
             if detector is not None:
-                args.apples_before, args.apples_after, apple_trace = detector.detect(before_path, after_path)
+                found, detector_trace = detector.detect(before_path, after_path)
+                set_detections(args, found)
             try:
                 args.board = load_board_profile(after_lap['route'], sid)
                 entry, picture = compare_stop(before_path, after_path, args)
             except BoardNotFound as exc:
                 entry, picture = {'status': 'board_not_found', 'reason': str(exc)}, None
-            if apple_trace is not None:
-                entry['apple_model'] = apple_trace
+            if detector_trace is not None:
+                entry['detector'] = detector_trace
             if picture is not None:
                 entry['image'] = f'{sid}.jpg'
                 cv2.imwrite(os.path.join(out_dir, entry['image']), picture)

@@ -8,3 +8,6 @@ patrol_manager:
     # 열매 판정용 사과 검출 모델(팀원 학습 YOLO26n). apple_model: false면 색 규칙만 쓴다
     apple_model: true
     apple_weights: ~/plant_ws/models/apple_yolo26n_aug_v1.pt
+    # 잎 탈락 판정용 잎 검출 모델(팀원 학습 YOLO26n). 잎 색 변화는 색 규칙. leaf_model: false면 잎 탈락도 색 규칙
+    leaf_model: true
+    leaf_weights: ~/plant_ws/models/leaf_yolo26n_aug_v5.pt

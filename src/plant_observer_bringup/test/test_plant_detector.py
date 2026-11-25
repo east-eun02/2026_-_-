@@ -1,4 +1,4 @@
-"""Apple detection model: box selection, apple matching, coordinate mapping, fallback, real model."""
+"""Apple/leaf detection models: box selection, matching, coordinate mapping, fallback, real models."""
 import json
 from pathlib import Path
 import shutil
@@ -11,7 +11,8 @@ import numpy as np
 import pytest
 
 from plant_observer_bringup import change_compare as cc
-from plant_observer_bringup.apple_detector import AppleDetector, DEFAULT_APPLE_WEIGHTS, select_apples
+from plant_observer_bringup.plant_detector import (DEFAULT_APPLE_WEIGHTS, DEFAULT_LEAF_WEIGHTS, PlantDetector,
+                                                   select, select_apples)
 from plant_observer_bringup.model_fallback import DEFAULT_PYTHON
 
 FIXTURES = Path(__file__).parent/'fixtures/vision'
@@ -97,8 +98,9 @@ def painted(path, *apples):
     return path
 
 
-def compare(before, after, apples_before, apples_after):
-    options = SimpleNamespace(**cc.DEFAULTS, apples_before=apples_before, apples_after=apples_after)
+def compare(before, after, apples_before, apples_after, leaves_before=None, leaves_after=None):
+    options = SimpleNamespace(**cc.DEFAULTS, apples_before=apples_before, apples_after=apples_after,
+                              leaves_before=leaves_before, leaves_after=leaves_after)
     return cc.compare_stop(str(before), str(after), options)[0]
 
 
@@ -170,6 +172,77 @@ def test_orange_leaves_outside_apple_boxes_stay_leaf_changes():
     assert result['changes'] == {'leaf_color': 2} and result['fruit_source'] == 'apple_model'
 
 
+# --- leaf model --------------------------------------------------------------------------------
+
+LEAF = (770, 160, 810, 200)   # 식물 오른쪽 벽. 기준 사진에만 그려 넣어 "뗀 잎"을 만든다
+GREEN_LEAF, BROWN_LEAF = (60, 150, 60), (40, 70, 120)
+
+
+def leaf(cls, conf, box):
+    return {'class': cls, 'confidence': conf, 'bbox': list(box)}
+
+
+def painted_leaf(path, color):
+    image = cv2.imread(str(FIXTURES/'P01_baseline.png'))
+    x1, y1, x2, y2 = LEAF
+    cv2.ellipse(image, ((x1+x2)//2, (y1+y2)//2), ((x2-x1)//2, (y2-y1)//2), 0, 0, 360, color, -1)
+    cv2.imwrite(str(path), image)
+    return path
+
+
+def test_leaf_model_class_names_and_thresholds():
+    kept = select([{'class': '정상 잎', 'confidence': .36, 'bbox': [0, 0, 10, 10]},
+                   {'class': '비정상 잎', 'confidence': .24, 'bbox': [0, 0, 400, 100]},
+                   {'class': '비정상 잎', 'confidence': .6, 'bbox': [50, 50, 60, 60]}], 'leaf')
+    assert [k['class'] for k in kept] == ['abnormal_leaf', 'normal_leaf']
+
+
+def test_only_unmatched_normal_reference_leaves_are_loss_candidates():
+    before = [leaf('normal_leaf', .8, (0, 0, 40, 40)), leaf('normal_leaf', .8, (100, 0, 140, 40)),
+              leaf('abnormal_leaf', .8, (200, 0, 240, 40))]
+    after = [leaf('normal_leaf', .8, (3, 2, 43, 42)), leaf('normal_leaf', .8, (400, 0, 440, 40))]
+    assert cc.leaf_changes(before, after) == [('leaf_loss', [100, 0, 140, 40])]
+
+
+def test_removed_leaf_is_reported_by_leaf_model(tmp_path):
+    before = painted_leaf(tmp_path/'b.png', GREEN_LEAF)
+    result = compare(before, FIXTURES/'P01_baseline.png', [], [], [leaf('normal_leaf', .8, LEAF)], [])
+    assert result['changes'] == {'leaf_loss': 1} and result['leaf_loss_source'] == 'leaf_model'
+    assert [o.get('source') for o in result['objects']] == ['leaf_model']
+    assert result['leaves']['reference'] == {'normal_leaf': 1, 'abnormal_leaf': 0}
+
+
+def test_color_rule_leaf_loss_is_replaced_by_leaf_model(tmp_path):
+    before = painted_leaf(tmp_path/'b.png', GREEN_LEAF)
+    rules = compare(before, FIXTURES/'P01_baseline.png', None, None)
+    assert rules['changes'] == {'leaf_loss': 1}
+    # 잎 모델이 그 자리에서 잎을 못 찾았으면(두 사진 모두) 색 규칙 잎 탈락은 세지 않는다
+    assert compare(before, FIXTURES/'P01_baseline.png', None, None, [], [])['status'] == 'unchanged'
+
+
+def test_leaf_missed_in_current_photo_is_not_loss(tmp_path):
+    image = painted_leaf(tmp_path/'a.png', GREEN_LEAF)
+    result = compare(image, image, [], [], [leaf('normal_leaf', .8, LEAF)], [])
+    assert result['status'] == 'unchanged'
+    assert result['leaves']['changes_checked'][0]['counted'] is False
+
+
+def test_leaf_turned_brown_is_not_leaf_loss(tmp_path):
+    before = painted_leaf(tmp_path/'b.png', GREEN_LEAF)
+    after = painted_leaf(tmp_path/'a.png', BROWN_LEAF)
+    result = compare(before, after, [], [], [leaf('normal_leaf', .8, LEAF)], [])
+    assert 'leaf_loss' not in result['changes'] and result['status'] == 'changed', result
+    check = result['leaves']['changes_checked'][0]
+    assert check['replaced_fraction'] >= cc.LEAF_MAX_REPLACED and not check['counted']
+
+
+def test_leaf_box_inside_apple_is_dropped(tmp_path):
+    image = painted(tmp_path/'a.png', (PLANT_APPLE, RED))
+    apples = [apple('normal_apple', .9, PLANT_APPLE)]
+    result = compare(image, image, apples, apples, [], [leaf('normal_leaf', .6, PLANT_APPLE)])
+    assert result['leaves']['current']['normal_leaf'] == 0
+
+
 # --- compare_with_baseline / detector failure -----------------------------------------------------
 
 def records(tmp_path, after_image=FIXTURES/'P01_baseline.png'):
@@ -186,29 +259,41 @@ def test_detector_failure_falls_back_to_color_rules_and_is_recorded(tmp_path, mo
     current = records(tmp_path)
     monkeypatch.setattr(cc, 'load_board_profile', Mock(return_value=None))
     detector = Mock()
-    detector.detect.return_value = (None, None, {'status': 'failed', 'error': 'TimeoutError: x'})
+    detector.detect.return_value = ({'apple': None, 'leaf': None}, {'status': 'failed', 'error': 'TimeoutError: x'})
     result = cc.compare_with_baseline(str(tmp_path), 'gazebo_demo', str(current), 'P00', str(current/'P00.png'),
-                                      apple_detector=detector)
-    assert result['status'] == 'unchanged' and 'fruit_source' not in result
-    assert result['apple_model']['status'] == 'failed'
+                                      plant_detector=detector)
+    assert result['status'] == 'unchanged' and 'fruit_source' not in result and 'leaf_loss_source' not in result
+    assert result['detector']['status'] == 'failed'
 
 
 def test_detector_result_is_used_through_public_api(tmp_path, monkeypatch):
     current = records(tmp_path, painted(tmp_path/'a.png', (PLANT_APPLE, RED)))
     monkeypatch.setattr(cc, 'load_board_profile', Mock(return_value=None))
     detector = Mock()
-    detector.detect.return_value = ([], [apple('normal_apple', .9, PLANT_APPLE)], {'status': 'used'})
+    detector.detect.return_value = ({'apple': ([], [apple('normal_apple', .9, PLANT_APPLE)]), 'leaf': ([], [])},
+                                    {'status': 'used'})
     result = cc.compare_with_baseline(str(tmp_path), 'gazebo_demo', str(current), 'P00', str(current/'P00.png'),
-                                      apple_detector=detector)
-    assert result['changes'] == {'fruit_added': 1} and result['apple_model'] == {'status': 'used'}
+                                      plant_detector=detector)
+    assert result['changes'] == {'fruit_added': 1} and result['detector'] == {'status': 'used'}
+    assert result['leaf_loss_source'] == 'leaf_model'
     assert (current/result['image']).is_file()
 
 
 def test_missing_runtime_never_raises(tmp_path):
-    detector = AppleDetector(python=str(tmp_path/'no-python'), weights=str(tmp_path/'no-model'))
+    detector = PlantDetector(python=str(tmp_path/'no-python'), apple_weights=str(tmp_path/'no-apple'),
+                             leaf_weights=str(tmp_path/'no-leaf'))
     assert not detector.available()
-    before, after, trace = detector.detect('before', 'after')
-    assert before is after is None and trace['status'] == 'failed' and detector.process is None
+    found, trace = detector.detect('before', 'after')
+    assert found == {'apple': None, 'leaf': None} and trace['status'] == 'failed' and detector.process is None
+
+
+def test_only_existing_weights_are_loaded(tmp_path):
+    weights = tmp_path/'apple.pt'
+    weights.write_bytes(b'test')
+    detector = PlantDetector(python=sys.executable, apple_weights=str(weights), leaf_weights=str(tmp_path/'none.pt'))
+    command = detector._command()
+    assert f'apple={weights}@640' in command and not any(arg.startswith('leaf=') for arg in command)
+    assert PlantDetector(apple_weights='', leaf_weights=str(weights)).paths == {'leaf': str(weights)}
 
 
 def test_hung_worker_times_out(tmp_path):
@@ -216,27 +301,32 @@ def test_hung_worker_times_out(tmp_path):
     worker.write_text('import sys,time\nsys.stdin.readline()\ntime.sleep(30)\n')
     weights = tmp_path/'weights'
     weights.write_bytes(b'test')
-    detector = AppleDetector(python=sys.executable, weights=str(weights), worker=str(worker), timeout=.3)
-    _, _, trace = detector.detect('before', 'after')
+    detector = PlantDetector(python=sys.executable, apple_weights=str(weights), leaf_weights=None,
+                             worker=str(worker), timeout=.3)
+    _, trace = detector.detect('before', 'after')
     assert 'TimeoutError' in trace['error'] and detector.process is None
 
 
-# --- real model on real camera photos -------------------------------------------------------------
+# --- real models on real camera photos ------------------------------------------------------------
 
 @pytest.fixture(scope='module')
 def real_detector():
-    if not (Path(DEFAULT_PYTHON).is_file() and Path(DEFAULT_APPLE_WEIGHTS).is_file() and CAPTURES.exists()):
-        pytest.skip('Local model runtime, apple weights and real camera photos required')
-    detector = AppleDetector(timeout=60.)
+    if not (Path(DEFAULT_PYTHON).is_file() and Path(DEFAULT_APPLE_WEIGHTS).is_file()
+            and Path(DEFAULT_LEAF_WEIGHTS).is_file() and CAPTURES.exists()):
+        pytest.skip('Local model runtime, apple/leaf weights and real camera photos required')
+    detector = PlantDetector(timeout=60.)
     yield detector
     detector.close()
 
 
-def test_real_model_finds_rotten_and_fresh_apples(real_detector):
+def test_real_models_find_apples_and_green_leaves(real_detector):
     # 2026-11-03_212306 P01: 위 상한 사과 1, 아래 멀쩡한 사과 1 (멀쩡한 쪽에 normal/abnormal 박스가 겹쳐 나옴)
     # 2026-11-04_205859 P01: 멀쩡한 사과 1
-    image = str(CAPTURES/'2026-11-03_212306/P01.png')
-    found, same, trace = real_detector.detect(image, str(CAPTURES/'2026-11-04_205859/P01.png'))
-    assert trace['status'] == 'used' and trace['model']['name'] == 'apple_yolo26n_aug_v1.pt'
-    assert sorted(a['class'] for a in found) == ['abnormal_apple', 'normal_apple']
-    assert [a['class'] for a in same] == ['normal_apple']
+    found, trace = real_detector.detect(str(CAPTURES/'2026-11-03_212306/P01.png'),
+                                        str(CAPTURES/'2026-11-04_205859/P01.png'))
+    assert trace['status'] == 'used' and 'missing' not in trace
+    assert {m['name'] for m in trace['models'].values()} == {'apple_yolo26n_aug_v1.pt', 'leaf_yolo26n_aug_v5.pt'}
+    apples_then, apples_now = found['apple']
+    assert sorted(a['class'] for a in apples_then) == ['abnormal_apple', 'normal_apple']
+    assert [a['class'] for a in apples_now] == ['normal_apple']
+    assert all(len([a for a in group if a['class'] == 'normal_leaf']) >= 4 for group in found['leaf'])

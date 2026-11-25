@@ -63,18 +63,24 @@ class WorkerProcess:
             self.stderr = None
         self.buffer = b''
 
+    def available(self):
+        return os.path.isfile(self.python) and os.path.isfile(self.weights)
+
+    def _command(self):
+        return [self.python, self.worker, '--weights', self.weights, '--threads', '2']
+
     def _start(self):
         if self.process is not None and self.process.poll() is None:
             return
         self.close()
-        if not os.path.isfile(self.python) or not os.path.isfile(self.weights):
+        if not self.available():
             raise FileNotFoundError('모델 실행 환경 또는 가중치 없음')
         env = os.environ.copy()
         env.pop('PYTHONPATH', None)
         env['PYTHONUNBUFFERED'] = '1'
         self.stderr = tempfile.TemporaryFile()
         self.process = subprocess.Popen(
-            [self.python, self.worker, '--weights', self.weights, '--threads', '2'],
+            self._command(),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.stderr,
             env=env, start_new_session=True)
 
