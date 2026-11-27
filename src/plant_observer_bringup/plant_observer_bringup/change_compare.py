@@ -807,6 +807,15 @@ def compare_stop(before_path, after_path, args):
                 ys, xs = box_slice(found['bbox'], (h, w))
                 cv2.rectangle(panel, (xs.start, ys.start), (xs.stop - 1, ys.stop - 1),
                               (60, 200, 60) if found['class'] == 'normal_leaf' else (0, 140, 255), 1)
+    # 사과 검출도 그려 둔다. 변화가 없으면 아무 표시도 없어 모델이 사과를 못 잡은 것처럼 보였다
+    if apples is not None:
+        for panel, group in ((before, apples[0]), (warped, apples[1])):
+            for found in group:
+                ys, xs = box_slice(found['bbox'], (h, w))
+                normal = found['class'] == 'normal_apple'
+                color = (40, 40, 230) if normal else (180, 60, 180)
+                cv2.rectangle(panel, (xs.start, ys.start), (xs.stop - 1, ys.stop - 1), color, 2)
+                draw_label(panel, 'apple' if normal else 'damaged apple', (xs.start, max(14, ys.start - 4)), color)
     if board is not None:
         contours, _ = cv2.findContours(board_before, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for panel in panels:

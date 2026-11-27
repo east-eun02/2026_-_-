@@ -531,11 +531,12 @@ const needsLook = (i) => i.kind === 'check' || i.kind === 'growth';
 function remember(key, value) { try { localStorage.setItem(key, value); } catch (e) {} }
 function recall(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
 
-async function load() {
+// 처음 열 때와 순찰이 끝났을 때(newest)는 가장 최근 회차의 루트를 보여 준다. 목록이 최신 회차 순이라 routes[0]
+async function load(newest) {
   const res = await fetch('/api/observations');
   data = await res.json();
   const routes = [...new Set(data.items.map((i) => i.route))];
-  const current = $('route').value || recall('route') || routes[0] || '';
+  const current = (!newest && $('route').value) || routes[0] || '';
   $('route').innerHTML = routes.map((r) => `<option value="${esc(r)}">${esc(r)}</option>`).join('');
   $('route').value = routes.includes(current) ? current : (routes[0] || '');
   render();
@@ -629,9 +630,9 @@ $('list').addEventListener('click', (e) => {
   const el = e.target.closest('.item');
   if (el) { selected = el.dataset.key; render(); }
 });
-$('route').addEventListener('change', () => { remember('route', $('route').value); selected = null; render(); });
+$('route').addEventListener('change', () => { selected = null; render(); });
 $('filter').addEventListener('change', () => { remember('filter', $('filter').value); render(); });
-$('reload').addEventListener('click', load);
+$('reload').addEventListener('click', () => load());
 $('filter').value = recall('filter') || 'all';
 load();
 
@@ -686,7 +687,7 @@ function renderControl() {
   else if (c.notice) message(c.notice, true);
   else if (robot === 'active' && !ready && !RUNNING.includes(patrol)) message('로봇 준비 중입니다. Nav2와 위치가 ✓가 되면 순찰할 수 있습니다');
   // 순찰이 끝나면 새 회차가 보이도록 기록을 다시 읽는다
-  if (lastPatrol && RUNNING.includes(lastPatrol) && !RUNNING.includes(patrol)) load();
+  if (lastPatrol && RUNNING.includes(lastPatrol) && !RUNNING.includes(patrol)) load(true);
   lastPatrol = patrol;
 }
 

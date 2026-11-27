@@ -1,0 +1,14 @@
+# 조화(입체 인공 식물) 순찰 루트 (patrol_manager route:=demo_real3_artificial)
+# 지도·출발점·관측 지점은 인쇄 보드용 demo_real3와 같다. 조화는 인쇄 보드가 있던 자리에 둔다:
+#   plant_00 = 지도 (1.63, 0.97), plant_01 = 지도 (0.43, 1.00), 왼쪽 긴 벽에서 0.5m 앞
+# 루트 이름을 따로 두어 인쇄 보드 회차와 비교·방문 순서·관찰 기록이 섞이지 않게 한다.
+# 조화 뒤에 흰 보드가 없으므로 보드를 찾지 않고 초록 식물 주변(plant_roi)만 비교한다(comparison_scope: plant).
+# 실물 U20CAM이 옆으로 달려 있어 사진을 시계 방향 90° 돌려 저장한다 (patrol_manager image_rotation)
+image_rotation: 90
+comparison_scope: plant
+# 실물 끝벽 근처에서 35° 옆면 촬영 후 회전이 collision_monitor에 막혔다 (demo_real3와 같음)
+recheck_angle_deg: 25.0
+home: {x: 0.0, y: 0.0, yaw: 0.0}
+stops:
+  - {id: P00, x: 1.61, y: 0.47, yaw: 1.545}
+  - {id: P01, x: 0.41, y: 0.50, yaw: 1.545}
