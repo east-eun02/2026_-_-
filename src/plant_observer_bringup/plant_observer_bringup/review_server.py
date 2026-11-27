@@ -31,7 +31,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from plant_observer_bringup.change_compare import CHANGE_TYPES, VERDICT_TEXT, describe_changes
-from plant_observer_bringup.robot_control import ACTIONS, Controller
+from plant_observer_bringup.robot_control import ACTIONS, ROBOT_UNIT, Controller, unit_state
 
 REVIEWS_FILE = 'reviews.json'
 REVIEW_RESULTS = ['미확인', '확인 완료', '조치 필요', '오탐(변화 아님)', '재촬영 필요']
@@ -272,6 +272,13 @@ def make_handler(store, controller=None, pin=None):
                 else:
                     self.send_json({'enabled': True, 'pin_required': bool(pin), 'last_lap': store.latest_lap(),
                                     **controller.status()})
+            elif url.path == '/api/live':
+                self.send_json(controller.live() if controller else {'robot_state': None})
+            elif url.path == '/api/live/map.png' and controller and controller.ros and (png := controller.ros.map_png()):
+                self.send(HTTPStatus.OK, png, 'image/png')
+            elif (url.path == '/api/live/camera.jpg' and controller and controller.ros
+                  and unit_state(ROBOT_UNIT)['state'] == 'active' and (jpeg := controller.ros.camera_jpeg())):
+                self.send(HTTPStatus.OK, jpeg, 'image/jpeg')
             elif url.path == '/api/export.csv':
                 items = store.observations()
                 route = parse_qs(url.query).get('route', [''])[0]
@@ -467,10 +474,15 @@ button.danger { background: var(--check); color: #fff; border-color: var(--check
 .notice { font-size: 14px; }
 .notice.error { color: var(--check); }
 button.quiet { margin-left: auto; color: var(--muted); font-size: 13px; }
+#live { padding: 10px 16px 12px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.live { display: grid; grid-template-columns: 3fr 2fr; gap: 12px; margin-top: 10px; align-items: start; }
+.live canvas { display: block; width: 100%; background: var(--none-bg); }
+.live .cam canvas { max-height: 60vh; object-fit: contain; }
 @media (max-width: 760px) {
   main { grid-template-columns: 1fr; }
   #list { position: static; max-height: 40vh; border-right: 0; border-bottom: 1px solid var(--line); }
   .photos { grid-template-columns: 1fr; }
+  .live { grid-template-columns: 1fr; }
   #control button { flex: 1 1 auto; padding: 10px 12px; }
   #control button.quiet { flex: 0 0 auto; padding: 6px 10px; }
 }
@@ -512,6 +524,19 @@ button.quiet { margin-left: auto; color: var(--muted); font-size: 13px; }
   <div class="row">
     <span id="controlMsg" class="notice"></span>
     <button id="poweroff" class="quiet" type="button">노트북 끄기</button>
+  </div>
+</section>
+<section id="live" hidden>
+  <div class="row">
+    <strong>실시간 보기</strong>
+    <span id="liveInfo" class="saved"></span>
+    <button id="liveToggle" class="quiet" type="button">열기</button>
+  </div>
+  <div id="liveBody" class="live" hidden>
+    <figure><canvas id="liveMap" height="0"></canvas>
+      <figcaption>지도 · <span style="color:#d33">●</span> 라이다 <span style="color:#2f6fd6">━</span> 가는 경로
+        <span style="color:#2f7d4f">●</span> 관측 지점 <span style="color:#e08a00">▲</span> 로봇</figcaption></figure>
+    <figure class="cam"><canvas id="liveCam" height="0"></canvas><figcaption id="camCaption">카메라</figcaption></figure>
   </div>
 </section>
 <main>
@@ -661,6 +686,7 @@ function renderControl() {
   const c = control;
   if (!c.enabled) return;
   $('control').hidden = false;
+  $('live').hidden = false;
   const robot = c.robot.state, patrol = c.patrol.state;
   $('robotState').textContent = c.robot.installed ? (UNIT[robot] || robot) : '서비스 미설치';
   $('robotState').className = 'badge ' + (UNIT_KIND[robot] || 'k-none');
@@ -730,6 +756,100 @@ $('home').addEventListener('click', () => act('home'));
 $('poweroff').addEventListener('click', () => act('poweroff', '로봇을 끄고 노트북 전원을 끌까요? 다시 켜려면 노트북 전원 버튼을 눌러야 합니다.'));
 refreshControl();
 setInterval(refreshControl, 3000);
+
+// ── 실시간 보기: 0.5초마다 로봇·라이다·경로, 카메라는 초당 최대 5장 (열어 둔 동안만) ──
+let liveOpen = recall('liveOpen') === '1', live = null, mapImg = null, mapVersion = null, camBusy = false;
+const showingLive = () => liveOpen && !$('live').hidden && document.visibilityState === 'visible';
+
+function setLive(open) {
+  liveOpen = open;
+  remember('liveOpen', open ? '1' : '0');
+  $('liveBody').hidden = !open;
+  $('liveToggle').textContent = open ? '닫기' : '열기';
+  if (open) { pollLive(); pollCamera(); }
+}
+
+async function pollLive() {
+  if (!showingLive()) return;
+  try {
+    live = await (await fetch('/api/live')).json();
+  } catch (e) { $('liveInfo').textContent = '노트북과 연결이 끊겼습니다'; return; }
+  if (live.map && live.map.version !== mapVersion) {
+    mapVersion = live.map.version;
+    const img = new Image();
+    img.onload = () => { mapImg = img; drawMap(); };
+    img.src = '/api/live/map.png?v=' + encodeURIComponent(mapVersion);
+  }
+  const r = live.robot;
+  $('liveInfo').textContent = live.robot_state !== 'active' ? '로봇이 꺼져 있습니다'
+    : !live.map ? '지도를 기다리는 중' : !r ? '위치를 기다리는 중'
+    : `위치 (${r[0].toFixed(2)}, ${r[1].toFixed(2)}) · 방향 ${Math.round(r[2] * 180 / Math.PI)}°`;
+  drawMap();
+}
+
+function drawMap() {
+  const canvas = $('liveMap'), m = live && live.map;
+  if (!m || !mapImg) { canvas.height = 0; return; }
+  const dpr = window.devicePixelRatio || 1, w = Math.round(canvas.clientWidth * dpr) || 600;
+  const scale = w / (m.width * m.resolution), h = Math.round(m.height * m.resolution * scale);
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  const px = (x) => (x - m.origin[0]) * scale, py = (y) => h - (y - m.origin[1]) * scale;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(mapImg, 0, 0, w, h);
+  if (live.plan.length > 1) {
+    ctx.strokeStyle = '#2f6fd6'; ctx.lineWidth = 2 * dpr; ctx.beginPath();
+    live.plan.forEach(([x, y], i) => (i ? ctx.lineTo(px(x), py(y)) : ctx.moveTo(px(x), py(y))));
+    ctx.stroke();
+  }
+  const route = live.route || {};
+  ctx.font = `${12 * dpr}px system-ui, sans-serif`;
+  for (const stop of route.stops || []) {
+    ctx.fillStyle = '#2f7d4f'; ctx.beginPath(); ctx.arc(px(stop.x), py(stop.y), 4 * dpr, 0, 2 * Math.PI); ctx.fill();
+    ctx.fillText(stop.id, px(stop.x) + 6 * dpr, py(stop.y) - 6 * dpr);
+  }
+  if (route.home) {
+    ctx.strokeStyle = '#2f7d4f'; ctx.lineWidth = 1.5 * dpr;
+    ctx.strokeRect(px(route.home.x) - 5 * dpr, py(route.home.y) - 5 * dpr, 10 * dpr, 10 * dpr);
+  }
+  ctx.fillStyle = '#d33';
+  for (const [x, y] of live.scan) ctx.fillRect(px(x) - 1.5 * dpr, py(y) - 1.5 * dpr, 3 * dpr, 3 * dpr);
+  if (live.robot) {
+    const [x, y, yaw] = live.robot, len = Math.max(0.14 * scale, 9 * dpr);
+    ctx.save(); ctx.translate(px(x), py(y)); ctx.rotate(-yaw);
+    ctx.fillStyle = '#e08a00'; ctx.strokeStyle = '#000'; ctx.lineWidth = dpr;
+    ctx.beginPath(); ctx.moveTo(len, 0); ctx.lineTo(-len * 0.5, len * 0.45); ctx.lineTo(-len * 0.5, -len * 0.45);
+    ctx.closePath(); ctx.fill(); ctx.stroke(); ctx.restore();
+  }
+}
+
+function pollCamera() {
+  if (!showingLive() || camBusy) return;
+  if (!live || live.robot_state !== 'active') { $('camCaption').textContent = '카메라 (로봇이 켜지면 보입니다)'; return; }
+  camBusy = true;
+  const img = new Image();
+  img.onload = () => { drawCamera(img); camBusy = false; };
+  img.onerror = () => { $('camCaption').textContent = '카메라 영상을 기다리는 중'; camBusy = false; };
+  img.src = '/api/live/camera.jpg?t=' + Date.now();
+}
+
+function drawCamera(img) {
+  // 카메라가 옆으로 달려 있어 루트의 사진 회전(시계 방향)만큼 돌려 그린다
+  const turn = ((live.route && live.route.image_rotation) || 0) % 360, side = turn === 90 || turn === 270;
+  const canvas = $('liveCam');
+  canvas.width = side ? img.height : img.width; canvas.height = side ? img.width : img.height;
+  const ctx = canvas.getContext('2d');
+  ctx.translate(canvas.width / 2, canvas.height / 2); ctx.rotate(turn * Math.PI / 180);
+  ctx.drawImage(img, -img.width / 2, -img.height / 2);
+  $('camCaption').textContent = '카메라 ' + new Date().toLocaleTimeString();
+}
+
+$('liveToggle').addEventListener('click', () => setLive(!liveOpen));
+window.addEventListener('resize', drawMap);
+document.addEventListener('visibilitychange', () => { if (showingLive()) { pollLive(); pollCamera(); } });
+setInterval(pollLive, 500);
+setInterval(pollCamera, 200);   // 앞 장면을 받은 뒤에만 다음 장면을 요청한다(camBusy) → 최대 초당 5장
+setLive(liveOpen);
 </script>
 </body>
 </html>

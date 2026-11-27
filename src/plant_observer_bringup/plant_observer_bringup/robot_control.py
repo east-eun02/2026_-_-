@@ -4,6 +4,7 @@
 plant-patrol은 plant-onboard에 묶여 있어서(Requisite·PartOf·After) 로봇이 꺼져 있으면 시작되지 않고,
 로봇을 끄면 순찰이 먼저 멈춘 뒤(이동 취소) 로봇이 꺼진다.
 바퀴·라이다·카메라·Nav2·위치 상태는 rclpy가 있으면 작은 노드를 띄워 토픽으로 본다.
+같은 노드가 '실시간 보기'(live_view)용 지도·라이다·경로·카메라 영상도 받아 둔다.
 """
 import os
 import subprocess
@@ -38,11 +39,16 @@ class RosMonitor:
     ROS 환경 없이 관찰 기록 화면만 띄워도 되도록 rclpy는 스레드 안에서 불러온다.
     """
     FRESH = 2.0
+    # 카메라 영상은 화면이 이 시간 안에 요청했을 때만 받는다 (아무도 안 보면 압축·전송을 하지 않게)
+    CAMERA_IDLE = 5.0
 
     def __init__(self):
         self.available = False
         self.error = None
         self.seen = {}
+        self.latest = {}   # 실시간 보기용 마지막 메시지: scan, map, plan, camera
+        self.tf_buffer = None
+        self.camera_wanted = -1e9
         threading.Thread(target=self._spin, daemon=True).start()
 
     def _spin(self):
@@ -51,22 +57,63 @@ class RosMonitor:
             from lifecycle_msgs.srv import GetState
             from nav_msgs.msg import Odometry
             from rclpy.executors import SingleThreadedExecutor
-            from rclpy.qos import qos_profile_sensor_data
+            from nav_msgs.msg import OccupancyGrid, Path
+            from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
             from rclpy.signals import SignalHandlerOptions
             from rclpy.time import Time
-            from sensor_msgs.msg import CameraInfo, LaserScan
+            from sensor_msgs.msg import CameraInfo, CompressedImage, LaserScan
             from tf2_ros import Buffer, TransformListener
+
+            from plant_observer_bringup.live_view import map_png, path_points
 
             # Ctrl-C는 관찰 기록 화면(KeyboardInterrupt)이 받는다
             rclpy.init(args=[], signal_handler_options=SignalHandlerOptions.NO)
             node = rclpy.create_node('plant_review_status')
             mark = lambda key: lambda _msg: self.seen.__setitem__(key, time.monotonic())
             node.create_subscription(Odometry, '/odom', mark('wheels'), qos_profile_sensor_data)
-            node.create_subscription(LaserScan, '/scan_filtered', mark('lidar'), qos_profile_sensor_data)
+
+            def on_scan(msg):
+                self.seen['lidar'] = time.monotonic()
+                self.latest['scan'] = msg
+
+            def on_map(msg):
+                info = msg.info
+                self.latest['map'] = {
+                    'png': map_png(info.width, info.height, msg.data),
+                    'info': {'version': f'{msg.header.stamp.sec}.{msg.header.stamp.nanosec}',
+                             'resolution': info.resolution, 'width': info.width, 'height': info.height,
+                             'origin': [info.origin.position.x, info.origin.position.y]}}
+
+            def on_plan(msg):
+                self.latest['plan'] = (time.monotonic(),
+                                       path_points([(p.pose.position.x, p.pose.position.y) for p in msg.poses]))
+
+            node.create_subscription(LaserScan, '/scan_filtered', on_scan, qos_profile_sensor_data)
             # 영상 대신 작은 camera_info로 카메라가 살아 있는지 본다
             node.create_subscription(CameraInfo, '/camera/camera_info', mark('camera'), qos_profile_sensor_data)
+            # map_server는 지도를 한 번만 보낸다(transient local). 나중에 붙어도 받도록 같은 QoS로 구독
+            node.create_subscription(OccupancyGrid, '/map', on_map,
+                                     QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+            node.create_subscription(Path, '/plan', on_plan, 1)
             tf_buffer = Buffer()
             TransformListener(tf_buffer, node)
+            self.tf_buffer = tf_buffer
+            camera = []
+
+            def on_camera(msg):
+                self.latest['camera'] = (time.monotonic(), bytes(msg.data))
+
+            def camera_switch():
+                # 구독을 만들고 지우는 일은 executor 스레드(이 타이머)에서만 한다
+                wanted = time.monotonic() - self.camera_wanted < self.CAMERA_IDLE
+                if wanted and not camera:
+                    camera.append(node.create_subscription(
+                        CompressedImage, '/camera/image_raw/compressed', on_camera, qos_profile_sensor_data))
+                elif not wanted and camera:
+                    node.destroy_subscription(camera.pop())
+                    self.latest.pop('camera', None)
+
+            node.create_timer(0.5, camera_switch)
             client = node.create_client(GetState, 'bt_navigator/get_state')
 
             def on_state(future):
@@ -88,6 +135,43 @@ class RosMonitor:
             self.available = False
             self.error = repr(exc)
 
+    def camera_jpeg(self):
+        """최근 카메라 JPEG (없으면 None). 부를 때마다 카메라 구독을 연장한다."""
+        self.camera_wanted = time.monotonic()
+        stamp, data = self.latest.get('camera', (-1e9, None))
+        return data if time.monotonic() - stamp < self.FRESH else None
+
+    def map_png(self):
+        return (self.latest.get('map') or {}).get('png')
+
+    def live(self):
+        """실시간 보기 한 장면: 지도 정보, 로봇 자세, 라이다 점, 경로 (모두 지도 좌표)."""
+        from plant_observer_bringup.live_view import pose2d, scan_points
+        from rclpy.time import Time
+        now = time.monotonic()
+        result = {'available': self.available, 'map': (self.latest.get('map') or {}).get('info'),
+                  'robot': None, 'scan': [], 'plan': []}
+        buffer = self.tf_buffer
+        if buffer is None:
+            return result
+        try:
+            result['robot'] = [round(v, 3) for v in
+                               pose2d(buffer.lookup_transform('map', 'base_footprint', Time()).transform)]
+        except Exception:
+            pass
+        scan = self.latest.get('scan')
+        if scan is not None and now - self.seen.get('lidar', -1e9) < self.FRESH:
+            try:
+                sensor = pose2d(buffer.lookup_transform('map', scan.header.frame_id, Time()).transform)
+                result['scan'] = scan_points(scan.ranges, scan.angle_min, scan.angle_increment,
+                                             scan.range_min, scan.range_max, sensor)
+            except Exception:
+                pass
+        stamp, plan = self.latest.get('plan', (-1e9, []))
+        # 순찰이 끝난 뒤에도 마지막 경로가 남아 있지 않게, 한동안 새 경로가 없으면 지운다
+        result['plan'] = plan if now - stamp < 30. else []
+        return result
+
     def snapshot(self):
         now = time.monotonic()
         # Nav2·위치는 1초마다 확인하므로 조금 더 여유를 둔다
@@ -108,6 +192,7 @@ class Controller:
         self.notice = None   # 뒤에서 돌다 실패한 동작의 안내 (화면에 한 번 보여 줌)
         self.ros = RosMonitor() if ros else None
         self._poweroff_checked = (0., None)
+        self._route = None
 
     def patrol_request(self):
         """마지막으로 시작한 순찰 인자 (상태 표시용)."""
@@ -142,6 +227,17 @@ class Controller:
         notice, self.notice = self.notice, None
         return {'route': self.route, 'max_laps': self.max_laps, 'robot': robot, 'patrol': patrol,
                 'ros': ros, 'busy': self.busy, 'notice': notice, 'can_poweroff': self.can_poweroff()}
+
+    def live(self):
+        """실시간 보기: 로봇이 켜져 있을 때만 ROS 데이터를 보낸다. 지점 표시는 순찰 버튼 루트를 쓴다."""
+        if self._route is None:
+            from plant_observer_bringup.live_view import load_route
+            self._route = load_route(self.route) or {}
+        robot = unit_state(ROBOT_UNIT)['state']
+        data = (self.ros.live() if self.ros and robot == 'active'
+                else {'available': bool(self.ros and self.ros.available), 'map': None, 'robot': None,
+                      'scan': [], 'plan': []})
+        return {'robot_state': robot, 'route': self._route, **data}
 
     def run(self, action, laps=1):
         """(성공 여부, 사람이 읽는 말). 긴 동작은 기다리지 않고 바로 돌려준다(--no-block)."""
